@@ -1,0 +1,4 @@
+include LICENSE
+include SKILL.md
+include .env.example
+recursive-include agents *.yaml

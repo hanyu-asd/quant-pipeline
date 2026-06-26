@@ -1,0 +1,81 @@
+name: 量化投研全自动链条
+
+on:
+  schedule:
+    - cron: '30 10 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          cd daily_stock_analysis && pip install -e .
+          cd ../AlphaSift && pip install -e .
+          cd ../AlphaEvo && pip install -e .
+
+      - name: AlphaSift 全市场扫描
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+        run: |
+          cd AlphaSift
+          alphasift screen balanced_alpha --no-llm --save-run
+          mkdir -p ../shared
+          cp runs/*.json ../shared/candidates.json 2>/dev/null || echo '[]' > ../shared/candidates.json
+
+      - name: 解析选股结果并注入环境变量
+        id: pass_stocks
+        run: |
+          if [ -f shared/candidates.json ] && [ -s shared/candidates.json ]; then
+            STOCKS=$(jq -r '.[] | .code' shared/candidates.json | tr '\n' ',' | sed 's/,$//')
+            echo "STOCK_LIST=$STOCKS" >> $GITHUB_ENV
+          else
+            echo "STOCK_LIST=${{ secrets.STOCK_LIST }}" >> $GITHUB_ENV
+          fi
+
+      - name: daily_stock_analysis 深度分析
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          STOCK_LIST: ${{ env.STOCK_LIST }}
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+        run: |
+          cd daily_stock_analysis
+          python main.py
+
+      - name: AlphaEvo 策略回测与进化
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
+        run: |
+          cd AlphaEvo
+          alphaevo evolve rsi_reversion_v1 --method llm
+          alphaevo trajectory
+
+      - name: 上传所有报告
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: quant-reports
+          path: |
+            daily_stock_analysis/reports/
+            AlphaSift/runs/
+            AlphaEvo/trajectory/
+            shared/
