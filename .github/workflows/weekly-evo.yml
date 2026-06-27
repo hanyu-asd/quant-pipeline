@@ -34,7 +34,8 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          alphaevo evolve rsi_reversion --method llm --rounds 5 --samples 90
+          # ✅ 修改点：指定策略文件的完整相对路径
+          alphaevo evolve strategies/builtin/rsi_reversion --method llm --rounds 5 --samples 90
 
       - name: 提取冠军策略得分
         id: get_champion_score
