@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-自动判断市场状态并选择策略
-5个数据源按优先级依次尝试：Baostock → efinance → 新浪 → 腾讯 → AkShare
-趋势判断：双窗口（20天 + 60天）+ ATR动态阈值 + 确认天数机制
+双窗口趋势判断 + 策略选择
+5个数据源备份：Baostock → efinance → 新浪 → 腾讯 → AkShare
+判断依据：MA20/MA60 + 20日动量 + 3天确认 + 科技溢价
 """
 
 import requests
 import json
 import re
-import sys
 import os
 from datetime import datetime, timedelta
 
@@ -28,7 +27,7 @@ def get_index_history_baostock(symbol, days=100):
             return None
         rs = bs.query_history_k_data_plus(
             symbol,
-            "date,open,high,low,close,volume",
+            "date,close",
             start_date=start_date,
             end_date=end_date,
             frequency="d",
@@ -41,13 +40,10 @@ def get_index_history_baostock(symbol, days=100):
         if data is None or len(data) < 10:
             return None
         closes = [float(x) for x in data['close'].tolist()]
-        highs = [float(x) for x in data['high'].tolist()]
-        lows = [float(x) for x in data['low'].tolist()]
-        volumes = [float(x) for x in data['volume'].tolist()] if 'volume' in data.columns else None
-        return closes, highs, lows, volumes
+        return closes
     except Exception as e:
         print(f"  Baostock失败: {e}")
-        return None, None, None, None
+        return None
 
 
 # ============================================================
@@ -63,13 +59,10 @@ def get_index_history_efinance(symbol, days=100):
         if df is None or len(df) < 10:
             return None
         closes = df.iloc[:, 2].tolist()
-        highs = df.iloc[:, 3].tolist()
-        lows = df.iloc[:, 4].tolist()
-        volumes = df.iloc[:, 5].tolist()
-        return closes, highs, lows, volumes
+        return closes
     except Exception as e:
         print(f"  efinance失败: {e}")
-        return None, None, None, None
+        return None
 
 
 # ============================================================
@@ -90,12 +83,10 @@ def get_index_history_sina(symbol, days=100):
         if not data or len(data) < 10:
             return None
         closes = [float(item['close']) for item in data]
-        highs = [float(item['high']) for item in data] if 'high' in data[0] else closes
-        lows = [float(item['low']) for item in data] if 'low' in data[0] else closes
-        return closes, highs, lows, None
+        return closes
     except Exception as e:
         print(f"  新浪财经失败: {e}")
-        return None, None, None, None
+        return None
 
 
 # ============================================================
@@ -122,12 +113,10 @@ def get_index_history_tencent(symbol, days=100):
         if not kline_data:
             return None
         closes = [float(item[2]) for item in kline_data if len(item) > 2]
-        highs = [float(item[3]) for item in kline_data if len(item) > 3] else closes
-        lows = [float(item[4]) for item in kline_data if len(item) > 4] else closes
-        return closes, highs, lows, None
+        return closes
     except Exception as e:
         print(f"  腾讯财经失败: {e}")
-        return None, None, None, None
+        return None
 
 
 # ============================================================
@@ -143,13 +132,10 @@ def get_index_history_akshare(symbol, days=100):
         if df.empty or len(df) < 10:
             return None
         closes = df['收盘'].values.tolist()
-        highs = df['最高'].values.tolist()
-        lows = df['最低'].values.tolist()
-        volumes = df['成交量'].values.tolist()
-        return closes, highs, lows, volumes
+        return closes
     except Exception as e:
         print(f"  AkShare失败: {e}")
-        return None, None, None, None
+        return None
 
 
 # ============================================================
@@ -158,144 +144,122 @@ def get_index_history_akshare(symbol, days=100):
 
 def get_index_data(symbol, days=100):
     if symbol in ["sh000001", "000001"]:
-        baostock_code = "sh.000001"
-        efinance_code = "000001"
-        sina_code = "sh000001"
-        tencent_code = "sh000001"
-        akshare_code = "000001"
+        code_map = {
+            "baostock": "sh.000001",
+            "efinance": "000001",
+            "sina": "sh000001",
+            "tencent": "sh000001",
+            "akshare": "000001"
+        }
         name = "上证指数"
     elif symbol in ["sz399006", "399006"]:
-        baostock_code = "sz.399006"
-        efinance_code = "399006"
-        sina_code = "sz399006"
-        tencent_code = "sz399006"
-        akshare_code = "399006"
+        code_map = {
+            "baostock": "sz.399006",
+            "efinance": "399006",
+            "sina": "sz399006",
+            "tencent": "sz399006",
+            "akshare": "399006"
+        }
         name = "创业板指"
     else:
-        return None, None, None, None, None
+        return None
 
     print(f"  正在获取 {name} 数据...")
 
     # 1. Baostock
     print("   1️⃣ 尝试 Baostock...")
-    closes, highs, lows, volumes = get_index_history_baostock(baostock_code, days)
+    closes = get_index_history_baostock(code_map["baostock"], days)
     if closes:
         print(f"   ✅ Baostock成功: {len(closes)} 个交易日")
-        return closes, highs, lows, volumes, name
+        return closes
 
     # 2. efinance
     print("   2️⃣ 尝试 efinance...")
-    closes, highs, lows, volumes = get_index_history_efinance(efinance_code, days)
+    closes = get_index_history_efinance(code_map["efinance"], days)
     if closes:
         print(f"   ✅ efinance成功: {len(closes)} 个交易日")
-        return closes, highs, lows, volumes, name
+        return closes
 
     # 3. 新浪财经
     print("   3️⃣ 尝试 新浪财经...")
-    closes, highs, lows, volumes = get_index_history_sina(sina_code, days)
+    closes = get_index_history_sina(code_map["sina"], days)
     if closes:
         print(f"   ✅ 新浪财经成功: {len(closes)} 个交易日")
-        return closes, highs, lows, volumes, name
+        return closes
 
     # 4. 腾讯财经
     print("   4️⃣ 尝试 腾讯财经...")
-    closes, highs, lows, volumes = get_index_history_tencent(tencent_code, days)
+    closes = get_index_history_tencent(code_map["tencent"], days)
     if closes:
         print(f"   ✅ 腾讯财经成功: {len(closes)} 个交易日")
-        return closes, highs, lows, volumes, name
+        return closes
 
     # 5. AkShare
     print("   5️⃣ 尝试 AkShare...")
-    closes, highs, lows, volumes = get_index_history_akshare(akshare_code, days)
+    closes = get_index_history_akshare(code_map["akshare"], days)
     if closes:
         print(f"   ✅ AkShare成功: {len(closes)} 个交易日")
-        return closes, highs, lows, volumes, name
+        return closes
 
     print(f"   ❌ 所有5个数据源均失败")
-    return None, None, None, None, None
+    return None
 
 
 # ============================================================
-# ATR 计算
+# 核心函数：双窗口趋势判断
 # ============================================================
 
-def calculate_atr(closes, highs, lows, period=20):
-    if len(closes) < period or len(highs) < period or len(lows) < period:
-        return 2.0
-    tr_list = []
-    for i in range(1, len(closes)):
-        high = highs[i]
-        low = lows[i]
-        prev_close = closes[i-1]
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        tr_pct = tr / closes[i] * 100
-        tr_list.append(tr_pct)
-    if len(tr_list) < period:
-        return 2.0
-    atr_pct = sum(tr_list[-period:]) / period
-    return round(atr_pct, 2)
+def calculate_ma(closes, period):
+    if len(closes) < period:
+        return closes[-1]
+    return sum(closes[-period:]) / period
 
 
-# ============================================================
-# 核心：双窗口趋势判断
-# ============================================================
+def detect_trend(sh_closes, cy_closes):
+    """
+    双窗口趋势判断：
+    1. MA20 vs MA60（中长期方向）
+    2. 近20日动量（短期强度）
+    3. 3天确认机制（减少频繁切换）
+    4. 科技溢价（创业板-上证 20日涨幅差）
+    """
+    if not sh_closes or len(sh_closes) < 60:
+        return "sideways", "rsi_reversion_v1", "数据不足，使用默认策略", "未知", 0
 
-def detect_trend(closes, highs, lows, volumes=None):
-    if len(closes) < 60:
-        return "sideways", "数据不足", 0, 0, 0, 0, ""
+    ma20 = calculate_ma(sh_closes, 20)
+    ma60 = calculate_ma(sh_closes, 60)
+    current = sh_closes[-1]
+    momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
 
-    ma20 = sum(closes[-20:]) / 20
-    ma60 = sum(closes[-60:]) / 60
-    current = closes[-1]
-
-    above_count = sum(1 for c in closes[-20:] if c > ma20)
-    above_ratio = above_count / 20 * 100
-    momentum_20 = (closes[-1] / closes[-20] - 1) * 100
-
-    atr_pct = calculate_atr(closes, highs, lows, 20)
-    extreme_threshold = max(2.0, atr_pct * 2.5)
-
-    volume_confirmation = ""
-    if volumes and len(volumes) >= 20:
-        avg_volume_20 = sum(volumes[-20:]) / 20
-        last_volume = volumes[-1]
-        volume_ratio = last_volume / avg_volume_20 if avg_volume_20 > 0 else 1.0
-        if volume_ratio > 1.5:
-            volume_confirmation = f"放量（{volume_ratio:.2f}倍）"
-        elif volume_ratio < 0.7:
-            volume_confirmation = f"缩量（{volume_ratio:.2f}倍）"
-        else:
-            volume_confirmation = f"正常（{volume_ratio:.2f}倍）"
-
+    # 1. 中长期方向（MA20 vs MA60）
     if ma20 > ma60:
         long_trend = "up"
-        long_desc = f"中长期向上（MA20 {ma20:.2f} > MA60 {ma60:.2f}）"
+        long_desc = f"MA20({ma20:.2f}) > MA60({ma60:.2f})"
     elif ma20 < ma60:
         long_trend = "down"
-        long_desc = f"中长期向下（MA20 {ma20:.2f} < MA60 {ma60:.2f}）"
+        long_desc = f"MA20({ma20:.2f}) < MA60({ma60:.2f})"
     else:
         long_trend = "sideways"
-        long_desc = "中长期震荡（MA20 ≈ MA60）"
+        long_desc = "MA20 ≈ MA60"
 
-    if above_ratio >= 70:
-        strength = "strong"
-        strength_desc = f"趋势牢固（{above_count}/20 = {above_ratio:.0f}% 天数在MA20上方）"
-    elif above_ratio >= 50:
-        strength = "medium"
-        strength_desc = f"趋势一般（{above_count}/20 = {above_ratio:.0f}% 天数在MA20上方）"
+    # 2. 近20日动量修正
+    if long_trend == "up" and momentum_20 < -3:
+        base_trend = "sideways"
+        base_reason = f"中长期向上但短期动量偏弱（{momentum_20:.2f}%），暂判震荡"
+    elif long_trend == "down" and momentum_20 > 3:
+        base_trend = "sideways"
+        base_reason = f"中长期向下但短期动量偏强（{momentum_20:.2f}%），暂判震荡"
+    elif long_trend == "up":
+        base_trend = "up"
+        base_reason = f"中长期向上，短期动量 {momentum_20:.2f}%"
+    elif long_trend == "down":
+        base_trend = "down"
+        base_reason = f"中长期向下，短期动量 {momentum_20:.2f}%"
     else:
-        strength = "weak"
-        strength_desc = f"趋势较弱（{above_count}/20 = {above_ratio:.0f}% 天数在MA20上方）"
+        base_trend = "sideways"
+        base_reason = "中长期方向不明"
 
-    is_extreme = False
-    extreme_desc = ""
-    if long_trend == "up" and momentum_20 < -extreme_threshold:
-        is_extreme = True
-        extreme_desc = f"短期跌幅 {momentum_20:.2f}% 超过阈值 {extreme_threshold:.2f}%（ATR×2.5）"
-    elif long_trend == "down" and momentum_20 > extreme_threshold:
-        is_extreme = True
-        extreme_desc = f"短期反弹 {momentum_20:.2f}% 超过阈值 {extreme_threshold:.2f}%（ATR×2.5）"
-
+    # 3. 确认天数机制（连续3天确认才切换）
     prev_trend = "sideways"
     confirm_days = 0
     if os.path.exists(STATE_FILE):
@@ -307,51 +271,54 @@ def detect_trend(closes, highs, lows, volumes=None):
         except:
             pass
 
-    if long_trend == "up" and strength in ["strong", "medium"] and not is_extreme:
-        base_trend = "up"
-        base_reason = f"{long_desc}，{strength_desc}，趋势持续"
-    elif long_trend == "down" and strength in ["strong", "medium"] and not is_extreme:
-        base_trend = "down"
-        base_reason = f"{long_desc}，{strength_desc}，趋势持续"
-    else:
-        if is_extreme:
-            base_trend = "sideways"
-            base_reason = f"{long_desc}，{extreme_desc}，转为震荡观察"
-        else:
-            base_trend = "sideways"
-            base_reason = f"{long_desc}，{strength_desc}，按震荡处理"
-
     if base_trend == prev_trend:
         confirm_days = min(confirm_days + 1, 5)
         final_trend = base_trend
         final_reason = f"{base_reason}（已确认 {confirm_days} 天）"
     else:
         confirm_days = 0
-        if confirm_days < 3:
-            final_trend = prev_trend
-            final_reason = f"{base_reason}（确认天数 {confirm_days}/3，暂不切换）"
-        else:
+        final_trend = prev_trend
+        final_reason = f"{base_reason}（确认天数 {confirm_days}/3，暂不切换，保持 {prev_trend}）"
+        if confirm_days >= 3:
             final_trend = base_trend
-            final_reason = base_reason
+            final_reason = f"{base_reason}（已确认 {confirm_days} 天，切换至 {base_trend}）"
 
+    # 4. 科技溢价
+    tech_premium = 0
+    if cy_closes and len(cy_closes) >= 20 and len(sh_closes) >= 20:
+        ret_cy = (cy_closes[-1] / cy_closes[-20] - 1) * 100
+        ret_sh = (sh_closes[-1] / sh_closes[-20] - 1) * 100
+        tech_premium = round(ret_cy - ret_sh, 2)
+
+    # 5. 选择策略
+    if final_trend == "up" and tech_premium > 3:
+        strategy = "trend_pullback_rebound"
+        reason = f"上升趋势 + 科技股强势（溢价 {tech_premium}%）"
+    elif final_trend == "up":
+        strategy = "ma_crossover"
+        reason = f"上升趋势（动量 {momentum_20:.2f}%）"
+    elif final_trend == "down":
+        strategy = "rsi_reversion_v1"
+        reason = f"下降趋势（等待超跌反弹）"
+    else:
+        strategy = "rsi_reversion_v1"
+        reason = "震荡（均值回归）"
+
+    # 保存状态
     state = {
         "trend": final_trend,
         "confirm_days": confirm_days if final_trend == base_trend else 0,
         "last_check": datetime.now().strftime("%Y-%m-%d"),
         "ma20": ma20,
         "ma60": ma60,
-        "above_count": above_count,
-        "above_ratio": above_ratio,
         "momentum_20": momentum_20,
-        "atr_pct": atr_pct,
-        "extreme_threshold": extreme_threshold,
-        "volume_confirmation": volume_confirmation,
+        "tech_premium": tech_premium,
         "base_trend": base_trend
     }
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=2)
 
-    return final_trend, final_reason, above_count, above_ratio, momentum_20, atr_pct, volume_confirmation
+    return final_trend, strategy, reason, final_reason, tech_premium
 
 
 # ============================================================
@@ -360,87 +327,63 @@ def detect_trend(closes, highs, lows, volumes=None):
 
 def main():
     print("=" * 70)
-    print("📊 市场状态分析（双窗口 + ATR动态阈值 + 确认天数机制）")
+    print("📊 双窗口趋势判断 → 策略选择")
     print("=" * 70)
 
-    sh_closes, sh_highs, sh_lows, sh_volumes, sh_name = get_index_data("sh000001", 100)
-    if not sh_closes or len(sh_closes) < 60:
-        print("⚠️ 无法获取上证指数数据，使用默认策略: rsi_reversion_v1")
+    # 获取上证指数
+    sh_closes = get_index_data("sh000001", 100)
+    if not sh_closes:
+        print("⚠️ 无法获取指数数据，使用默认策略: rsi_reversion_v1")
         with open("selected_strategy.txt", "w") as f:
             f.write("rsi_reversion_v1")
         return
 
-    cy_closes, cy_highs, cy_lows, cy_volumes, cy_name = get_index_data("sz399006", 100)
+    # 获取创业板指
+    cy_closes = get_index_data("sz399006", 100)
     if not cy_closes:
         print("⚠️ 无法获取创业板指数据，将使用上证指数替代")
         cy_closes = sh_closes
 
-    if len(cy_closes) >= 20 and len(sh_closes) >= 20:
-        ret_cy = (cy_closes[-1] / cy_closes[-20] - 1) * 100
-        ret_sh = (sh_closes[-1] / sh_closes[-20] - 1) * 100
-        tech_premium = round(ret_cy - ret_sh, 2)
-    else:
-        tech_premium = 0
+    # 双窗口趋势判断
+    trend, strategy, reason, trend_reason, tech_premium = detect_trend(sh_closes, cy_closes)
 
-    trend, trend_reason, above_count, above_ratio, momentum_20, atr_pct, volume_conf = detect_trend(
-        sh_closes, sh_highs, sh_lows, sh_volumes
-    )
-    trend_desc = {"up": "上升趋势", "down": "下降趋势", "sideways": "震荡"}.get(trend, "未知")
-
-    if trend == "up" and tech_premium > 3:
-        strategy = "trend_pullback_rebound"
-        reason = f"上升趋势 + 科技股强势（溢价 {tech_premium}%）"
-    elif trend == "up":
-        strategy = "ma_crossover"
-        reason = "上升趋势"
-    elif trend == "down":
-        strategy = "rsi_reversion_v1"
-        reason = "下降趋势（等待超跌反弹）"
-    else:
-        strategy = "rsi_reversion_v1"
-        reason = "震荡（均值回归）"
-
-    ma20 = sum(sh_closes[-20:]) / 20
-    ma60 = sum(sh_closes[-60:]) / 60
+    ma20 = calculate_ma(sh_closes, 20)
+    ma60 = calculate_ma(sh_closes, 60)
     current = sh_closes[-1]
+    momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
+    trend_desc = {"up": "上升趋势", "down": "下降趋势", "sideways": "震荡"}.get(trend, "未知")
 
     print("")
     print("📊 分析结果:")
     print(f"  上证指数: {current:.2f}")
     print(f"  MA20: {ma20:.2f}")
     print(f"  MA60: {ma60:.2f}")
-    print(f"  ATR%: {atr_pct:.2f}%（极端阈值: {max(2.0, atr_pct*2.5):.2f}%）")
-    print(f"  近20日涨幅: {momentum_20:.2f}%")
-    print(f"  近20日 > MA20 天数: {above_count}/20 ({above_ratio:.0f}%)")
-    print(f"  成交量: {volume_conf}")
+    print(f"  近20日动量: {momentum_20:.2f}%")
+    print(f"  科技溢价（创-上）: {tech_premium}%")
     print("")
     print(f"🎯 趋势判断: {trend_desc}")
     print(f"📝 判断依据: {trend_reason}")
-    print(f"  科技溢价（创-上）: {tech_premium}%")
     print("")
     print(f"✅ 选定策略: {strategy}")
     print(f"📝 原因: {reason}")
     print("=" * 70)
 
+    # 输出策略名
     with open("selected_strategy.txt", "w") as f:
         f.write(strategy)
 
+    # 输出市场状态
     state = {
         "date": datetime.now().strftime("%Y-%m-%d"),
+        "trend": trend,
+        "trend_desc": trend_desc,
+        "strategy": strategy,
+        "reason": reason,
         "current_price": current,
         "ma20": ma20,
         "ma60": ma60,
-        "atr_pct": atr_pct,
         "momentum_20": momentum_20,
-        "above_count": above_count,
-        "above_ratio": above_ratio,
-        "trend": trend,
-        "trend_desc": trend_desc,
-        "trend_reason": trend_reason,
-        "tech_premium": tech_premium,
-        "strategy": strategy,
-        "reason": reason,
-        "volume_confirmation": volume_conf
+        "tech_premium": tech_premium
     }
     with open("market_state.json", "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)

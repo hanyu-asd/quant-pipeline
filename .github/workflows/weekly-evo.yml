@@ -2,7 +2,7 @@ name: 每周策略进化
 
 on:
   schedule:
-    - cron: '0 12 * * 5'   # 每周五北京时间 20:00
+    - cron: '0 12 * * 5'
   workflow_dispatch:
 
 jobs:
@@ -23,7 +23,7 @@ jobs:
           pip install -e .
           pip install requests baostock efinance akshare
 
-      - name: 自动判断市场状态并选择策略
+      - name: 双窗口趋势判断并选择策略
         id: select_strategy
         run: |
           cd ${{ github.workspace }}
@@ -34,7 +34,7 @@ jobs:
           if [ -f "market_state.json" ]; then
             mkdir -p daily_stock_analysis/reports/
             cp market_state.json daily_stock_analysis/reports/market_state.json
-            echo "✅ market_state.json 已同步到每日链条目录"
+            echo "✅ market_state.json 已同步"
           fi
 
       - name: 准备策略文件
@@ -43,7 +43,7 @@ jobs:
           STRATEGY="${{ env.SELECTED_STRATEGY }}"
           if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
             cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
-            echo "✅ 已复制策略文件: ${STRATEGY}.yaml"
+            echo "✅ 已复制策略: ${STRATEGY}.yaml"
           else
             echo "⚠️ 策略文件不存在: ${STRATEGY}.yaml"
           fi
@@ -63,7 +63,7 @@ jobs:
         run: |
           cd alphaevo
           STRATEGY="${{ env.SELECTED_STRATEGY }}"
-          echo "🚀 开始进化策略: $STRATEGY"
+          echo "🚀 进化策略: $STRATEGY"
           alphaevo evolve $STRATEGY --method llm --rounds 5 --samples 90
 
       - name: 自动部署冠军策略
@@ -76,7 +76,7 @@ jobs:
             cp "$CHAMPION_FILE" "$TARGET_FILE"
             echo "✅ 冠军策略已部署到: $TARGET_FILE"
             cp "$CHAMPION_FILE" "alphaevo/strategies/${STRATEGY}.yaml"
-            echo "✅ 冠军策略已同步到根目录"
+            echo "✅ 已同步到根目录"
           else
             echo "⚠️ 冠军策略文件不存在，跳过部署"
           fi
