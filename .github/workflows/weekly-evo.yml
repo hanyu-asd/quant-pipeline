@@ -27,22 +27,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y yq
 
-      # ✅ 新增调试步骤：确认策略文件位置
-      - name: 列出策略目录内容（调试）
-        run: |
-          echo "=== alphaevo/strategies/ 目录内容 ==="
-          ls -la alphaevo/strategies/
-          echo "=== alphaevo/strategies/builtin/ 目录内容 ==="
-          ls -la alphaevo/strategies/builtin/
-          echo "=== 检查 rsi_reversion.yaml 是否存在 ==="
-          if [ -f "alphaevo/strategies/rsi_reversion.yaml" ]; then
-            echo "✅ 文件存在"
-            echo "文件内容（前10行）:"
-            cat alphaevo/strategies/rsi_reversion.yaml | head -10
-          else
-            echo "❌ 文件不存在"
-          fi
-
       - name: Run AlphaEvo evolution
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -50,16 +34,21 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          alphaevo evolve rsi_reversion --method llm --rounds 5 --samples 90
+          # ✅ 直接指定 builtin/ 目录下的策略文件
+          alphaevo evolve builtin/rsi_reversion --method llm --rounds 5 --samples 90
 
       - name: 提取冠军策略得分
         id: get_champion_score
         run: |
-          CHAMPION_FILE="alphaevo/reports/rsi_reversion_champion.yaml"
+          CHAMPION_FILE="alphaevo/reports/builtin/rsi_reversion_champion.yaml"
           if [ ! -f "$CHAMPION_FILE" ]; then
-            echo "冠军策略文件不存在，跳过部署"
-            echo "champion_score=0" >> $GITHUB_ENV
-            exit 0
+            # 如果路径不对，尝试另一个可能的路径
+            CHAMPION_FILE="alphaevo/reports/rsi_reversion_champion.yaml"
+            if [ ! -f "$CHAMPION_FILE" ]; then
+              echo "冠军策略文件不存在，跳过部署"
+              echo "champion_score=0" >> $GITHUB_ENV
+              exit 0
+            fi
           fi
           SCORE=$(yq eval '.meta.score' $CHAMPION_FILE)
           if [ -z "$SCORE" ]; then
@@ -97,15 +86,20 @@ jobs:
         run: |
           mkdir -p archived_strategies
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          # 备份旧策略
           if [ -f "alphaevo/strategies/builtin/rsi_reversion.yaml" ]; then
             cp alphaevo/strategies/builtin/rsi_reversion.yaml archived_strategies/rsi_reversion_${TIMESTAMP}.yaml
           fi
-          cp alphaevo/reports/rsi_reversion_champion.yaml alphaevo/strategies/builtin/rsi_reversion.yaml
-          cp alphaevo/reports/rsi_reversion_champion.yaml alphaevo/strategies/rsi_reversion.yaml
+          # 部署冠军策略到 builtin 目录
+          if [ -f "alphaevo/reports/builtin/rsi_reversion_champion.yaml" ]; then
+            cp alphaevo/reports/builtin/rsi_reversion_champion.yaml alphaevo/strategies/builtin/rsi_reversion.yaml
+          else
+            cp alphaevo/reports/rsi_reversion_champion.yaml alphaevo/strategies/builtin/rsi_reversion.yaml
+          fi
           echo "${{ env.champion_score }}" > archived_strategies/current_score.txt
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add alphaevo/strategies/builtin/rsi_reversion.yaml alphaevo/strategies/rsi_reversion.yaml archived_strategies/
+          git add alphaevo/strategies/builtin/rsi_reversion.yaml archived_strategies/
           git commit -m "自动部署优化的冠军策略 (得分: ${{ env.champion_score }})"
           git push origin master
 
