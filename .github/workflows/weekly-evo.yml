@@ -2,7 +2,7 @@ name: 每周策略进化
 
 on:
   schedule:
-    - cron: '0 12 * * 5'   # 每周五北京时间 20:00
+    - cron: '0 12 * * 5'
   workflow_dispatch:
 
 jobs:
@@ -22,92 +22,18 @@ jobs:
           cd alphaevo
           pip install -e .
 
-      - name: Install yq
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y yq
-
-      - name: Run AlphaEvo evolution
+      - name: Run AlphaEvo
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          # ✅ 直接指定 builtin/ 目录下的策略文件
-          alphaevo evolve builtin/rsi_reversion --method llm --rounds 5 --samples 90
+          alphaevo evolve rsi_reversion --method llm --rounds 5 --samples 90
 
-      - name: 提取冠军策略得分
-        id: get_champion_score
-        run: |
-          CHAMPION_FILE="alphaevo/reports/builtin/rsi_reversion_champion.yaml"
-          if [ ! -f "$CHAMPION_FILE" ]; then
-            # 如果路径不对，尝试另一个可能的路径
-            CHAMPION_FILE="alphaevo/reports/rsi_reversion_champion.yaml"
-            if [ ! -f "$CHAMPION_FILE" ]; then
-              echo "冠军策略文件不存在，跳过部署"
-              echo "champion_score=0" >> $GITHUB_ENV
-              exit 0
-            fi
-          fi
-          SCORE=$(yq eval '.meta.score' $CHAMPION_FILE)
-          if [ -z "$SCORE" ]; then
-            SCORE=0
-          fi
-          echo "champion_score=$SCORE" >> $GITHUB_ENV
-          echo "冠军策略得分: $SCORE"
-
-      - name: 提取当前策略得分
-        id: get_current_score
-        run: |
-          if [ -f "archived_strategies/current_score.txt" ]; then
-            CURRENT_SCORE=$(cat archived_strategies/current_score.txt)
-            echo "current_score=$CURRENT_SCORE" >> $GITHUB_ENV
-            echo "当前策略得分: $CURRENT_SCORE"
-          else
-            echo "current_score=0" >> $GITHUB_ENV
-            echo "未找到当前策略得分记录，默认设置为0"
-          fi
-
-      - name: 比较得分并决定是否部署
-        id: decide
-        run: |
-          champion=${{ env.champion_score }}
-          current=${{ env.current_score }}
-          echo "champion=$champion, current=$current"
-          if (( $(echo "$champion > $current" | bc -l) )); then
-            echo "should_deploy=true" >> $GITHUB_ENV
-          else
-            echo "should_deploy=false" >> $GITHUB_ENV
-          fi
-
-      - name: 部署冠军策略（如果得分更高）
-        if: env.should_deploy == 'true'
-        run: |
-          mkdir -p archived_strategies
-          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          # 备份旧策略
-          if [ -f "alphaevo/strategies/builtin/rsi_reversion.yaml" ]; then
-            cp alphaevo/strategies/builtin/rsi_reversion.yaml archived_strategies/rsi_reversion_${TIMESTAMP}.yaml
-          fi
-          # 部署冠军策略到 builtin 目录
-          if [ -f "alphaevo/reports/builtin/rsi_reversion_champion.yaml" ]; then
-            cp alphaevo/reports/builtin/rsi_reversion_champion.yaml alphaevo/strategies/builtin/rsi_reversion.yaml
-          else
-            cp alphaevo/reports/rsi_reversion_champion.yaml alphaevo/strategies/builtin/rsi_reversion.yaml
-          fi
-          echo "${{ env.champion_score }}" > archived_strategies/current_score.txt
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add alphaevo/strategies/builtin/rsi_reversion.yaml archived_strategies/
-          git commit -m "自动部署优化的冠军策略 (得分: ${{ env.champion_score }})"
-          git push origin master
-
-      - name: 上传每周进化报告
+      - name: 上传报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: weekly-evo-reports
-          path: |
-            alphaevo/reports/
-            archived_strategies/
+          path: alphaevo/reports/

@@ -1,5 +1,5 @@
 meta:
-  id: rsi_reversion
+  id: rsi_reversion_v1
   name: RSI Oversold Reversal
   version: 1
   parent_id: null
