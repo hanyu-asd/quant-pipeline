@@ -21,7 +21,7 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
-          pip install akshare pandas numpy
+          pip install yfinance pandas numpy
 
       - name: 自动判断市场状态并选择策略
         id: select_strategy
