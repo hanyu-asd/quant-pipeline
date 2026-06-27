@@ -2,7 +2,7 @@ name: 每日选股与分析
 
 on:
   schedule:
-    - cron: '30 10 * * 1-5'
+    - cron: '30 10 * * 1-5'   # 工作日北京时间 18:30
   workflow_dispatch:
 
 jobs:
@@ -24,6 +24,8 @@ jobs:
           pip install -e .
           pip install fake_useragent sqlalchemy
           cd ../alphasift
+          pip install -e .
+          cd ../alphaevo
           pip install -e .
 
       - name: AlphaSift 全市场扫描
@@ -61,6 +63,13 @@ jobs:
           cd daily_stock_analysis
           python main.py
 
+      - name: 计算候选股买卖价格（AlphaEvo 定价）
+        run: |
+          echo "📊 买卖价格参考（基于 rsi_reversion 策略）" > pricing.txt
+          echo "" >> pricing.txt
+          echo "候选股列表: ${{ env.STOCK_LIST }}" >> pricing.txt
+          echo "详细价格计算脚本待完善，当前为占位输出。" >> pricing.txt
+
       - name: 上传每日报告
         uses: actions/upload-artifact@v4
         if: always()
@@ -70,3 +79,4 @@ jobs:
             daily_stock_analysis/reports/
             alphasift/data/runs/
             shared/
+            pricing.txt
