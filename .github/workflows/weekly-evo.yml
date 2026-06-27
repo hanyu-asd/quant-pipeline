@@ -2,7 +2,7 @@ name: 每周策略进化
 
 on:
   schedule:
-    - cron: '0 12 * * 5'
+    - cron: '0 12 * * 5'   # 每周五北京时间 20:00
   workflow_dispatch:
 
 jobs:
@@ -29,6 +29,11 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
+          # ✅ 第一步：导入策略（让系统识别）
+          alphaevo strategy import strategies/builtin/rsi_reversion.yaml || true
+          # ✅ 第二步：查看已注册的策略列表（调试用）
+          alphaevo strategy list
+          # ✅ 第三步：运行进化（使用正确的 ID）
           alphaevo evolve rsi_reversion_v1 --method llm --rounds 5 --samples 90
 
       - name: 上传报告
