@@ -27,11 +27,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y yq
 
-      # 进化前复制策略到根目录（供 AlphaEvo 识别）
-      - name: Prepare strategy for evolution
+      # ✅ 新增调试步骤：确认策略文件位置
+      - name: 列出策略目录内容（调试）
         run: |
-          cd alphaevo/strategies
-          cp builtin/rsi_reversion.yaml rsi_reversion.yaml
+          echo "=== alphaevo/strategies/ 目录内容 ==="
+          ls -la alphaevo/strategies/
+          echo "=== alphaevo/strategies/builtin/ 目录内容 ==="
+          ls -la alphaevo/strategies/builtin/
+          echo "=== 检查 rsi_reversion.yaml 是否存在 ==="
+          if [ -f "alphaevo/strategies/rsi_reversion.yaml" ]; then
+            echo "✅ 文件存在"
+            echo "文件内容（前10行）:"
+            cat alphaevo/strategies/rsi_reversion.yaml | head -10
+          else
+            echo "❌ 文件不存在"
+          fi
 
       - name: Run AlphaEvo evolution
         env:
@@ -98,10 +108,6 @@ jobs:
           git add alphaevo/strategies/builtin/rsi_reversion.yaml alphaevo/strategies/rsi_reversion.yaml archived_strategies/
           git commit -m "自动部署优化的冠军策略 (得分: ${{ env.champion_score }})"
           git push origin master
-
-      - name: Clean up temporary strategy file
-        run: |
-          rm -f alphaevo/strategies/rsi_reversion.yaml
 
       - name: 上传每周进化报告
         uses: actions/upload-artifact@v4
