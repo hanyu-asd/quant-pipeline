@@ -21,7 +21,7 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
-          pip install requests akshare
+          pip install requests baostock efinance akshare
 
       - name: 自动判断市场状态并选择策略
         id: select_strategy
