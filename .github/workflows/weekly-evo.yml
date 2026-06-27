@@ -21,7 +21,27 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
-          pip install akshare
+          pip install akshare pandas numpy
+
+      - name: 自动判断市场状态并选择策略
+        id: select_strategy
+        run: |
+          cd ${{ github.workspace }}
+          python scripts/select_strategy.py
+          STRATEGY=$(cat selected_strategy.txt)
+          echo "SELECTED_STRATEGY=$STRATEGY" >> $GITHUB_ENV
+          echo "本周选定的策略: $STRATEGY"
+
+      - name: 导入策略
+        run: |
+          cd alphaevo
+          STRATEGY="${{ env.SELECTED_STRATEGY }}"
+          # 如果策略文件在 builtin 目录下，需要先复制到根目录
+          if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
+            cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
+          fi
+          alphaevo strategy import strategies/${STRATEGY}.yaml || true
+          alphaevo strategy list
 
       - name: Run AlphaEvo
         env:
@@ -30,13 +50,15 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          alphaevo strategy import strategies/builtin/rsi_reversion.yaml || true
-          alphaevo strategy list
-          alphaevo evolve rsi_reversion_v1 --method llm --rounds 5 --samples 90
+          STRATEGY="${{ env.SELECTED_STRATEGY }}"
+          echo "🚀 开始进化策略: $STRATEGY"
+          alphaevo evolve $STRATEGY --method llm --rounds 5 --samples 90
 
       - name: 上传报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: weekly-evo-reports
-          path: alphaevo/reports/
+          path: |
+            alphaevo/reports/
+            selected_strategy.txt
