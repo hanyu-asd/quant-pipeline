@@ -21,9 +21,9 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
-          pip install requests
+          pip install requests akshare
 
-      - name: 自动判断市场状态并选择策略（腾讯财经 API）
+      - name: 自动判断市场状态并选择策略
         id: select_strategy
         run: |
           cd ${{ github.workspace }}
