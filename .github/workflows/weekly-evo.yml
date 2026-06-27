@@ -27,6 +27,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y yq
 
+      # ✅ 新增步骤：复制策略文件到 strategies 根目录（供 AlphaEvo 查找）
+      - name: Prepare strategy file for evolution
+        run: |
+          cd alphaevo/strategies
+          cp builtin/rsi_reversion.yaml rsi_reversion.yaml
+
       - name: Run AlphaEvo evolution
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -34,8 +40,8 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          # ✅ 修改点：指定策略文件的完整相对路径
-          alphaevo evolve strategies/builtin/rsi_reversion --method llm --rounds 5 --samples 90
+          # ✅ 现在 strategies/rsi_reversion.yaml 存在，命令可以正常执行
+          alphaevo evolve rsi_reversion --method llm --rounds 5 --samples 90
 
       - name: 提取冠军策略得分
         id: get_champion_score
@@ -77,19 +83,24 @@ jobs:
             echo "should_deploy=false" >> $GITHUB_ENV
           fi
 
+      # ✅ 修改部署步骤：同时更新 builtin 和根目录两份文件
       - name: 部署冠军策略（如果得分更高）
         if: env.should_deploy == 'true'
         run: |
           mkdir -p archived_strategies
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          # 备份旧策略（来自 builtin 目录）
           if [ -f "alphaevo/strategies/builtin/rsi_reversion.yaml" ]; then
             cp alphaevo/strategies/builtin/rsi_reversion.yaml archived_strategies/rsi_reversion_${TIMESTAMP}.yaml
           fi
+          # 更新 builtin 目录下的策略
           cp alphaevo/reports/rsi_reversion_champion.yaml alphaevo/strategies/builtin/rsi_reversion.yaml
+          # ✅ 同步更新根目录下的策略（保持两份文件一致）
+          cp alphaevo/reports/rsi_reversion_champion.yaml alphaevo/strategies/rsi_reversion.yaml
           echo "${{ env.champion_score }}" > archived_strategies/current_score.txt
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add alphaevo/strategies/builtin/rsi_reversion.yaml archived_strategies/
+          git add alphaevo/strategies/builtin/rsi_reversion.yaml alphaevo/strategies/rsi_reversion.yaml archived_strategies/
           git commit -m "自动部署优化的冠军策略 (得分: ${{ env.champion_score }})"
           git push origin master
 
