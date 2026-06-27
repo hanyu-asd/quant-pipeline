@@ -41,11 +41,17 @@ jobs:
         run: |
           cd alphaevo
           STRATEGY="${{ env.SELECTED_STRATEGY }}"
+          # 尝试直接复制同名文件
           if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
             cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
             echo "✅ 已复制策略: ${STRATEGY}.yaml"
+          # 如果不存在，尝试复制 rsi_reversion.yaml 并重命名（兼容策略名 rsi_reversion_v1）
+          elif [ -f "strategies/builtin/rsi_reversion.yaml" ]; then
+            cp strategies/builtin/rsi_reversion.yaml strategies/${STRATEGY}.yaml
+            echo "✅ 已复制 rsi_reversion.yaml 为 ${STRATEGY}.yaml"
           else
             echo "⚠️ 策略文件不存在: ${STRATEGY}.yaml"
+            exit 1
           fi
 
       - name: 导入策略
