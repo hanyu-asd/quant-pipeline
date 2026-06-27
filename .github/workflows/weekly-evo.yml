@@ -21,9 +21,8 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
-          pip install yfinance pandas numpy
 
-      - name: 自动判断市场状态并选择策略
+      - name: 自动判断市场状态并选择策略（腾讯财经 API）
         id: select_strategy
         run: |
           cd ${{ github.workspace }}
@@ -32,14 +31,22 @@ jobs:
           echo "SELECTED_STRATEGY=$STRATEGY" >> $GITHUB_ENV
           echo "本周选定的策略: $STRATEGY"
 
+      - name: 准备策略文件
+        run: |
+          cd alphaevo
+          STRATEGY="${{ env.SELECTED_STRATEGY }}"
+          # 如果策略文件在 builtin 目录下，复制到根目录
+          if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
+            cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
+            echo "✅ 已复制策略文件: ${STRATEGY}.yaml"
+          else
+            echo "⚠️ 策略文件不存在: ${STRATEGY}.yaml"
+          fi
+
       - name: 导入策略
         run: |
           cd alphaevo
           STRATEGY="${{ env.SELECTED_STRATEGY }}"
-          # 如果策略文件在 builtin 目录下，需要先复制到根目录
-          if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
-            cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
-          fi
           alphaevo strategy import strategies/${STRATEGY}.yaml || true
           alphaevo strategy list
 
@@ -62,3 +69,4 @@ jobs:
           path: |
             alphaevo/reports/
             selected_strategy.txt
+            market_state.json
