@@ -4,7 +4,7 @@ meta:
   version: 1
   parent_id: null
   created_at: '2026-03-31'
-  market: cn
+  market: a_share
   category: reversal
   tags:
   - oversold
@@ -36,7 +36,7 @@ description: 'Suitable for volatile or range-bound markets.
   '
 universe:
   market:
-  - cn_main
+  - a_share
   filters:
   - field: market_cap
     op: '>='
