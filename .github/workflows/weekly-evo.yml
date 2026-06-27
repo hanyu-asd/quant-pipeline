@@ -36,18 +36,42 @@ jobs:
         run: |
           cd alphaevo
           STRATEGY="${{ env.SELECTED_STRATEGY }}"
-          if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
-            cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
-            echo "✅ 已复制策略文件: ${STRATEGY}.yaml"
+          echo "选定的策略: $STRATEGY"
+          
+          # 策略文件名映射：rsi_reversion_v1 → rsi_reversion
+          if [ "$STRATEGY" == "rsi_reversion_v1" ]; then
+            STRATEGY_FILE="rsi_reversion"
           else
-            echo "⚠️ 策略文件不存在: ${STRATEGY}.yaml"
+            STRATEGY_FILE="$STRATEGY"
+          fi
+          
+          # 检查并复制策略文件
+          if [ -f "strategies/builtin/${STRATEGY_FILE}.yaml" ]; then
+            cp strategies/builtin/${STRATEGY_FILE}.yaml strategies/${STRATEGY_FILE}.yaml
+            echo "✅ 已复制策略文件: ${STRATEGY_FILE}.yaml"
+          else
+            echo "⚠️ 策略文件不存在: strategies/builtin/${STRATEGY_FILE}.yaml"
+            echo "📂 查看 strategies/builtin/ 目录内容:"
+            ls -la strategies/builtin/
+            exit 1
+          fi
+          
+          # 设置导入用的策略名（使用文件的 ID）
+          if [ "$STRATEGY" == "rsi_reversion_v1" ]; then
+            echo "IMPORT_STRATEGY=rsi_reversion_v1" >> $GITHUB_ENV
+          else
+            echo "IMPORT_STRATEGY=$STRATEGY" >> $GITHUB_ENV
           fi
 
       - name: 导入策略
         run: |
           cd alphaevo
-          STRATEGY="${{ env.SELECTED_STRATEGY }}"
-          alphaevo strategy import strategies/${STRATEGY}.yaml || true
+          STRATEGY="${{ env.IMPORT_STRATEGY }}"
+          if [ "$STRATEGY" == "rsi_reversion_v1" ]; then
+            alphaevo strategy import strategies/rsi_reversion.yaml || true
+          else
+            alphaevo strategy import strategies/${STRATEGY}.yaml || true
+          fi
           alphaevo strategy list
 
       - name: Run AlphaEvo
@@ -57,7 +81,7 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          STRATEGY="${{ env.SELECTED_STRATEGY }}"
+          STRATEGY="${{ env.IMPORT_STRATEGY }}"
           echo "🚀 开始进化策略: $STRATEGY"
           alphaevo evolve $STRATEGY --method llm --rounds 5 --samples 90
 
