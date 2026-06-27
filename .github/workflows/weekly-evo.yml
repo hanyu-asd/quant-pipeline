@@ -34,12 +34,12 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          alphaevo evolve rsi_reversion_v1 --method llm --rounds 5 --samples 90
+          alphaevo evolve rsi_reversion --method llm --rounds 5 --samples 90
 
       - name: 提取冠军策略得分
         id: get_champion_score
         run: |
-          CHAMPION_FILE="alphaevo/reports/rsi_reversion_v1_champion.yaml"
+          CHAMPION_FILE="alphaevo/reports/rsi_reversion_champion.yaml"
           if [ ! -f "$CHAMPION_FILE" ]; then
             echo "冠军策略文件不存在，跳过部署"
             echo "champion_score=0" >> $GITHUB_ENV
@@ -81,14 +81,14 @@ jobs:
         run: |
           mkdir -p archived_strategies
           TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          if [ -f "alphasift/strategies/rsi_reversion_v1.yaml" ]; then
-            cp alphasift/strategies/rsi_reversion_v1.yaml archived_strategies/rsi_reversion_v1_${TIMESTAMP}.yaml
+          if [ -f "alphasift/strategies/rsi_reversion.yaml" ]; then
+            cp alphasift/strategies/rsi_reversion.yaml archived_strategies/rsi_reversion_${TIMESTAMP}.yaml
           fi
-          cp alphaevo/reports/rsi_reversion_v1_champion.yaml alphasift/strategies/rsi_reversion_v1.yaml
+          cp alphaevo/reports/rsi_reversion_champion.yaml alphasift/strategies/rsi_reversion.yaml
           echo "${{ env.champion_score }}" > archived_strategies/current_score.txt
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add alphasift/strategies/rsi_reversion_v1.yaml archived_strategies/
+          git add alphasift/strategies/rsi_reversion.yaml archived_strategies/
           git commit -m "自动部署优化的冠军策略 (得分: ${{ env.champion_score }})"
           git push origin master
 
