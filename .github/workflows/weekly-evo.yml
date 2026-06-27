@@ -34,7 +34,7 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          alphaevo evolve rsi_reversion_v1 --method llm --rounds 5 --samples 90 --universe sh,sz
+          alphaevo evolve rsi_reversion_v1 --method llm --rounds 5 --samples 90
 
       - name: 提取冠军策略得分
         id: get_champion_score
