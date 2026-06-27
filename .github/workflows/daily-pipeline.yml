@@ -65,7 +65,6 @@ jobs:
 
       - name: 计算候选股买卖价格（AlphaEvo 定价）
         run: |
-          # 创建定价计算脚本
           cat > pricing_calculator.py << 'EOF'
           import yaml
           import json
@@ -75,7 +74,6 @@ jobs:
           from datetime import datetime
 
           def load_candidates():
-              """从 shared/candidates.json 读取候选股列表"""
               candidates_file = "shared/candidates.json"
               if not os.path.exists(candidates_file):
                   print("候选股文件不存在，跳过定价计算")
@@ -86,7 +84,6 @@ jobs:
               return [item['code'] for item in picks if 'code' in item]
 
           def load_strategy():
-              """加载 rsi_reversion 策略"""
               strategy_file = "alphaevo/strategies/builtin/rsi_reversion.yaml"
               if not os.path.exists(strategy_file):
                   print("策略文件不存在，跳过定价计算")
@@ -95,7 +92,6 @@ jobs:
                   return yaml.safe_load(f)
 
           def get_stock_realtime_price(stock_code):
-              """获取股票实时价格（使用腾讯财经接口）"""
               try:
                   url = f"https://qt.gtimg.cn/q=sh{stock_code}"
                   response = requests.get(url, timeout=5)
@@ -107,53 +103,19 @@ jobs:
               except:
                   return None
 
-          def calculate_rsi(data, period=14):
-              """计算RSI指标"""
-              if len(data) < period + 1:
-                  return 50
-              gains = 0
-              losses = 0
-              for i in range(1, period + 1):
-                  diff = data[-i] - data[-i-1]
-                  if diff > 0:
-                      gains += diff
-                  else:
-                      losses += abs(diff)
-              avg_gain = gains / period
-              avg_loss = losses / period
-              if avg_loss == 0:
-                  return 100
-              rs = avg_gain / avg_loss
-              return 100 - (100 / (1 + rs))
-
-          def calculate_ma20(data):
-              """计算20日均线"""
-              if len(data) < 20:
-                  return data[-1]
-              return sum(data[-20:]) / 20
-
           def calculate_pricing(strategy, stock_code):
-              """根据策略计算买卖价格"""
-              # 获取历史数据（简化：用当前价格模拟）
               current_price = get_stock_realtime_price(stock_code)
               if current_price is None:
-                  return {"buy_price": 0, "stop_loss": 0, "take_profit": 0, "signal": "无法获取价格"}
+                  return {"buy_price": 0, "stop_loss": 0, "take_profit": 0, "signal": "无法获取价格", "current_price": 0}
               
-              # 从策略中提取买入/卖出条件
-              entry = strategy.get('entry', {})
               exit_params = strategy.get('exit', {})
-              
-              # 提取止损和止盈比例
               stop_loss_pct = exit_params.get('stop_loss', {}).get('value', 0.05)
               take_profit_pct = exit_params.get('take_profit', {}).get('value', 2.0)
               
-              # 计算买卖价格
-              buy_price = current_price * (1 - 0.02)  # 简化：当前价下浮2%
+              buy_price = current_price * (1 - 0.02)
               stop_loss = buy_price * (1 - stop_loss_pct)
-              take_profit = buy_price * (1 + take_profit_pct * 0.01)  # RR 比例换算
+              take_profit = buy_price * (1 + take_profit_pct * 0.01)
               
-              # 判断信号
-              # 实际应从策略中读取 RSI 阈值等条件
               signal = "观望"
               if current_price <= buy_price:
                   signal = "买入"
@@ -178,7 +140,6 @@ jobs:
               if not strategy:
                   sys.exit(1)
               
-              # 生成定价报告
               report_lines = [
                   "📊 买卖价格参考（基于 rsi_reversion 策略）",
                   "=" * 50,
@@ -200,7 +161,6 @@ jobs:
                   report_lines.append(f"  信号: {pricing['signal']}")
                   report_lines.append("")
               
-              # 写入文件
               with open("pricing.txt", "w", encoding="utf-8") as f:
                   f.write("\n".join(report_lines))
               print("定价报告已生成: pricing.txt")
@@ -209,8 +169,52 @@ jobs:
               main()
           EOF
           
-          # 运行定价计算脚本
           python pricing_calculator.py
+
+      - name: 发送买卖价格参考邮件
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+        run: |
+          cat > send_pricing_email.py << 'EOF'
+          import smtplib
+          from email.mime.text import MIMEText
+          import os
+
+          sender = os.environ.get('EMAIL_SENDER')
+          password = os.environ.get('EMAIL_PASSWORD')
+          receivers_str = os.environ.get('EMAIL_RECEIVERS', '')
+          receivers = [r.strip() for r in receivers_str.split(',') if r.strip()]
+
+          if not sender or not password or not receivers:
+              print("邮件配置不完整，跳过发送")
+              exit(0)
+
+          try:
+              with open('pricing.txt', 'r', encoding='utf-8') as f:
+                  content = f.read()
+          except FileNotFoundError:
+              content = "今日无候选股，无法生成买卖价格参考。"
+              print("pricing.txt 不存在，发送占位邮件")
+
+          subject = '📊 每日买卖价格参考'
+          msg = MIMEText(content, 'plain', 'utf-8')
+          msg['Subject'] = subject
+          msg['From'] = sender
+          msg['To'] = ', '.join(receivers)
+
+          try:
+              with smtplib.SMTP_SSL('smtp.qq.com', 465) as server:
+                  server.login(sender, password)
+                  server.sendmail(sender, receivers, msg.as_string())
+              print("买卖价格参考邮件已发送")
+          except Exception as e:
+              print(f"邮件发送失败: {e}")
+              exit(1)
+          EOF
+
+          python send_pricing_email.py
 
       - name: 上传每日报告
         uses: actions/upload-artifact@v4
