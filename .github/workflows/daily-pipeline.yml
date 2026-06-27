@@ -73,6 +73,23 @@ jobs:
           import requests
           from datetime import datetime
 
+          def load_market_state():
+              state_file = "market_state.json"
+              if not os.path.exists(state_file):
+                  state_file = "daily_stock_analysis/reports/market_state.json"
+              if os.path.exists(state_file):
+                  try:
+                      with open(state_file, 'r') as f:
+                          state = json.load(f)
+                          strategy = state.get('strategy', 'rsi_reversion_v1')
+                          print(f"📊 当前市场状态: {state.get('trend_desc', '未知')}")
+                          print(f"📊 使用策略: {strategy}")
+                          return strategy
+                  except Exception as e:
+                      print(f"⚠️ 读取市场状态失败: {e}")
+              print("⚠️ 未找到市场状态文件，使用默认策略: rsi_reversion_v1")
+              return "rsi_reversion_v1"
+
           def load_candidates():
               candidates_file = "shared/candidates.json"
               if not os.path.exists(candidates_file):
@@ -83,11 +100,13 @@ jobs:
               picks = data.get('picks', [])
               return [item['code'] for item in picks if 'code' in item]
 
-          def load_strategy():
-              strategy_file = "alphaevo/strategies/builtin/rsi_reversion.yaml"
+          def load_strategy(strategy_name):
+              strategy_file = f"alphaevo/strategies/builtin/{strategy_name}.yaml"
               if not os.path.exists(strategy_file):
-                  print("策略文件不存在，跳过定价计算")
-                  return None
+                  strategy_file = f"alphaevo/strategies/{strategy_name}.yaml"
+                  if not os.path.exists(strategy_file):
+                      print(f"⚠️ 策略文件不存在: {strategy_file}")
+                      return None
               with open(strategy_file, 'r') as f:
                   return yaml.safe_load(f)
 
@@ -107,21 +126,21 @@ jobs:
               current_price = get_stock_realtime_price(stock_code)
               if current_price is None:
                   return {"buy_price": 0, "stop_loss": 0, "take_profit": 0, "signal": "无法获取价格", "current_price": 0}
-              
+
               exit_params = strategy.get('exit', {})
               stop_loss_pct = exit_params.get('stop_loss', {}).get('value', 0.05)
               take_profit_pct = exit_params.get('take_profit', {}).get('value', 2.0)
-              
+
               buy_price = current_price * (1 - 0.02)
               stop_loss = buy_price * (1 - stop_loss_pct)
               take_profit = buy_price * (1 + take_profit_pct * 0.01)
-              
+
               signal = "观望"
               if current_price <= buy_price:
                   signal = "买入"
               elif current_price >= take_profit:
                   signal = "卖出"
-              
+
               return {
                   "buy_price": buy_price,
                   "stop_loss": stop_loss,
@@ -131,28 +150,34 @@ jobs:
               }
 
           def main():
+              strategy_name = load_market_state()
               candidates = load_candidates()
               if not candidates:
                   print("没有候选股，定价计算跳过")
                   sys.exit(0)
-              
-              strategy = load_strategy()
+
+              strategy = load_strategy(strategy_name)
               if not strategy:
-                  sys.exit(1)
-              
+                  print(f"⚠️ 无法加载策略: {strategy_name}，使用默认策略")
+                  strategy = load_strategy("rsi_reversion_v1")
+                  if not strategy:
+                      print("❌ 无法加载任何策略，定价计算失败")
+                      sys.exit(1)
+
               report_lines = [
-                  "📊 买卖价格参考（基于 rsi_reversion 策略）",
+                  "📊 买卖价格参考",
                   "=" * 50,
+                  f"使用策略: {strategy_name}",
                   f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                   ""
               ]
-              
+
               for code in candidates:
                   pricing = calculate_pricing(strategy, code)
                   if pricing.get("buy_price", 0) == 0:
                       report_lines.append(f"股票代码: {code} → 无法获取价格")
                       continue
-                  
+
                   report_lines.append(f"股票代码: {code}")
                   report_lines.append(f"  当前价: {pricing['current_price']:.2f}")
                   report_lines.append(f"  买入触发价: {pricing['buy_price']:.2f}")
@@ -160,15 +185,15 @@ jobs:
                   report_lines.append(f"  止盈价: {pricing['take_profit']:.2f}")
                   report_lines.append(f"  信号: {pricing['signal']}")
                   report_lines.append("")
-              
+
               with open("pricing.txt", "w", encoding="utf-8") as f:
                   f.write("\n".join(report_lines))
-              print("定价报告已生成: pricing.txt")
+              print("✅ 定价报告已生成: pricing.txt")
 
           if __name__ == "__main__":
               main()
           EOF
-          
+
           python pricing_calculator.py
 
       - name: 发送买卖价格参考邮件
