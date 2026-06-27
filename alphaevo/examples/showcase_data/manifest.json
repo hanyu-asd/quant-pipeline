@@ -1,0 +1,50 @@
+{
+  "snapshot_id": "us_tech_showcase_2025_2026",
+  "source_adapter": "yfinance",
+  "source_cache": "~/.alphaevo/cache",
+  "generated_at": "2026-04-29T14:36:09+00:00",
+  "date_range": {
+    "start": "2025-02-11",
+    "end": "2026-04-10"
+  },
+  "symbols": [
+    "AAPL",
+    "MSFT",
+    "NVDA",
+    "AMD",
+    "TSLA"
+  ],
+  "rows": [
+    {
+      "symbol": "AAPL",
+      "rows": 292,
+      "start": "2025-02-11",
+      "end": "2026-04-10"
+    },
+    {
+      "symbol": "MSFT",
+      "rows": 292,
+      "start": "2025-02-11",
+      "end": "2026-04-10"
+    },
+    {
+      "symbol": "NVDA",
+      "rows": 292,
+      "start": "2025-02-11",
+      "end": "2026-04-10"
+    },
+    {
+      "symbol": "AMD",
+      "rows": 292,
+      "start": "2025-02-11",
+      "end": "2026-04-10"
+    },
+    {
+      "symbol": "TSLA",
+      "rows": 292,
+      "start": "2025-02-11",
+      "end": "2026-04-10"
+    }
+  ],
+  "disclaimer": "Historical public market data for research demos only. Not investment advice."
+}
