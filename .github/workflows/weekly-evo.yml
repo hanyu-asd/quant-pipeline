@@ -21,9 +21,9 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
-          pip install requests baostock efinance akshare
+          pip install requests baostock efinance akshare pandas numpy
 
-      - name: 双窗口趋势判断并选择策略
+      - name: 双窗口趋势判断 + 多信号验证
         id: select_strategy
         run: |
           cd ${{ github.workspace }}

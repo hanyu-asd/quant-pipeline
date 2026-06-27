@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-双窗口趋势判断 + 策略选择
+双窗口趋势判断 + 多信号验证
 5个数据源备份：Baostock → efinance → 新浪 → 腾讯 → AkShare
-判断依据：MA20/MA60 + 20日动量 + 3天确认 + 科技溢价
+判断依据：MA20/MA60 + 动量 + 确认天数 + 科技溢价 + 多信号（技术面/资金面/情绪面）
 """
 
 import requests
 import json
 import re
 import os
+import sys
 from datetime import datetime, timedelta
 
+# 导入信号模块
+from signals import aggregate_all_signals
+
 STATE_FILE = "trend_state.json"
+
 
 # ============================================================
 # 数据源1：Baostock
@@ -206,7 +211,7 @@ def get_index_data(symbol, days=100):
 
 
 # ============================================================
-# 核心函数：双窗口趋势判断
+# 核心函数：双窗口趋势判断 + 信号验证
 # ============================================================
 
 def calculate_ma(closes, period):
@@ -217,21 +222,19 @@ def calculate_ma(closes, period):
 
 def detect_trend(sh_closes, cy_closes):
     """
-    双窗口趋势判断：
-    1. MA20 vs MA60（中长期方向）
-    2. 近20日动量（短期强度）
-    3. 3天确认机制（减少频繁切换）
-    4. 科技溢价（创业板-上证 20日涨幅差）
+    双窗口趋势判断 + 多信号验证
     """
     if not sh_closes or len(sh_closes) < 60:
-        return "sideways", "rsi_reversion_v1", "数据不足，使用默认策略", "未知", 0
+        return "sideways", "rsi_reversion_v1", "数据不足", "数据不足", 0, []
 
     ma20 = calculate_ma(sh_closes, 20)
     ma60 = calculate_ma(sh_closes, 60)
     current = sh_closes[-1]
     momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
 
-    # 1. 中长期方向（MA20 vs MA60）
+    # ============================================================
+    # 1. 双窗口基础判断
+    # ============================================================
     if ma20 > ma60:
         long_trend = "up"
         long_desc = f"MA20({ma20:.2f}) > MA60({ma60:.2f})"
@@ -242,7 +245,7 @@ def detect_trend(sh_closes, cy_closes):
         long_trend = "sideways"
         long_desc = "MA20 ≈ MA60"
 
-    # 2. 近20日动量修正
+    # 短期动量修正
     if long_trend == "up" and momentum_20 < -3:
         base_trend = "sideways"
         base_reason = f"中长期向上但短期动量偏弱（{momentum_20:.2f}%），暂判震荡"
@@ -259,7 +262,7 @@ def detect_trend(sh_closes, cy_closes):
         base_trend = "sideways"
         base_reason = "中长期方向不明"
 
-    # 3. 确认天数机制（连续3天确认才切换）
+    # 确认天数机制（3天确认）
     prev_trend = "sideways"
     confirm_days = 0
     if os.path.exists(STATE_FILE):
@@ -274,23 +277,43 @@ def detect_trend(sh_closes, cy_closes):
     if base_trend == prev_trend:
         confirm_days = min(confirm_days + 1, 5)
         final_trend = base_trend
-        final_reason = f"{base_reason}（已确认 {confirm_days} 天）"
+        trend_reason = f"{base_reason}（已确认 {confirm_days} 天）"
     else:
         confirm_days = 0
         final_trend = prev_trend
-        final_reason = f"{base_reason}（确认天数 {confirm_days}/3，暂不切换，保持 {prev_trend}）"
+        trend_reason = f"{base_reason}（确认天数 {confirm_days}/3，暂不切换，保持 {prev_trend}）"
         if confirm_days >= 3:
             final_trend = base_trend
-            final_reason = f"{base_reason}（已确认 {confirm_days} 天，切换至 {base_trend}）"
+            trend_reason = f"{base_reason}（已确认 {confirm_days} 天，切换至 {base_trend}）"
 
-    # 4. 科技溢价
+    # ============================================================
+    # 2. 多信号综合评分
+    # ============================================================
+    print("\n📊 信号采集:")
+    total_score, signal_details = aggregate_all_signals(sh_closes)
+
+    # 修正判断：如果双窗口判断为震荡，但信号评分强烈，则修正
+    if final_trend == "sideways" and total_score >= 50:
+        final_trend = "up"
+        trend_reason = f"双窗口震荡，但多信号共振确认上升（综合评分 {total_score}）"
+    elif final_trend == "sideways" and total_score <= -50:
+        final_trend = "down"
+        trend_reason = f"双窗口震荡，但多信号共振确认下降（综合评分 {total_score}）"
+    else:
+        trend_reason = f"{trend_reason}（综合评分 {total_score}）"
+
+    # ============================================================
+    # 3. 科技溢价
+    # ============================================================
     tech_premium = 0
     if cy_closes and len(cy_closes) >= 20 and len(sh_closes) >= 20:
         ret_cy = (cy_closes[-1] / cy_closes[-20] - 1) * 100
         ret_sh = (sh_closes[-1] / sh_closes[-20] - 1) * 100
         tech_premium = round(ret_cy - ret_sh, 2)
 
-    # 5. 选择策略
+    # ============================================================
+    # 4. 策略选择
+    # ============================================================
     if final_trend == "up" and tech_premium > 3:
         strategy = "trend_pullback_rebound"
         reason = f"上升趋势 + 科技股强势（溢价 {tech_premium}%）"
@@ -299,7 +322,7 @@ def detect_trend(sh_closes, cy_closes):
         reason = f"上升趋势（动量 {momentum_20:.2f}%）"
     elif final_trend == "down":
         strategy = "rsi_reversion_v1"
-        reason = f"下降趋势（等待超跌反弹）"
+        reason = "下降趋势（等待超跌反弹）"
     else:
         strategy = "rsi_reversion_v1"
         reason = "震荡（均值回归）"
@@ -313,12 +336,13 @@ def detect_trend(sh_closes, cy_closes):
         "ma60": ma60,
         "momentum_20": momentum_20,
         "tech_premium": tech_premium,
+        "total_score": total_score,
         "base_trend": base_trend
     }
     with open(STATE_FILE, 'w') as f:
         json.dump(state, f, indent=2)
 
-    return final_trend, strategy, reason, final_reason, tech_premium
+    return final_trend, strategy, reason, trend_reason, tech_premium, signal_details
 
 
 # ============================================================
@@ -327,7 +351,7 @@ def detect_trend(sh_closes, cy_closes):
 
 def main():
     print("=" * 70)
-    print("📊 双窗口趋势判断 → 策略选择")
+    print("📊 双窗口趋势判断 + 多信号验证")
     print("=" * 70)
 
     # 获取上证指数
@@ -344,8 +368,8 @@ def main():
         print("⚠️ 无法获取创业板指数据，将使用上证指数替代")
         cy_closes = sh_closes
 
-    # 双窗口趋势判断
-    trend, strategy, reason, trend_reason, tech_premium = detect_trend(sh_closes, cy_closes)
+    # 趋势判断
+    trend, strategy, reason, trend_reason, tech_premium, signal_details = detect_trend(sh_closes, cy_closes)
 
     ma20 = calculate_ma(sh_closes, 20)
     ma60 = calculate_ma(sh_closes, 60)
@@ -360,6 +384,10 @@ def main():
     print(f"  MA60: {ma60:.2f}")
     print(f"  近20日动量: {momentum_20:.2f}%")
     print(f"  科技溢价（创-上）: {tech_premium}%")
+    print("")
+    print("📊 信号详情:")
+    for detail in signal_details:
+        print(f"  {detail}")
     print("")
     print(f"🎯 趋势判断: {trend_desc}")
     print(f"📝 判断依据: {trend_reason}")
@@ -383,12 +411,13 @@ def main():
         "ma20": ma20,
         "ma60": ma60,
         "momentum_20": momentum_20,
-        "tech_premium": tech_premium
+        "tech_premium": tech_premium,
+        "signal_summary": signal_details
     }
     with open("market_state.json", "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
 
-    print("✅ 结果已保存")
+    print("✅ 结果已保存到 selected_strategy.txt 和 market_state.json")
 
 
 if __name__ == "__main__":
