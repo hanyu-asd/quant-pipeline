@@ -29,7 +29,7 @@ jobs:
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
         run: |
           cd alphaevo
-          alphaevo evolve rsi_reversion --method llm --rounds 5 --samples 90
+          alphaevo evolve rsi_reversion_v1 --method llm --rounds 5 --samples 90
 
       - name: 上传报告
         uses: actions/upload-artifact@v4
