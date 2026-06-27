@@ -1,4 +1,4 @@
-name: 量化投研全自动链条
+name: 每日选股与分析
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  pipeline:
+  daily:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -19,9 +19,12 @@ jobs:
 
       - name: Install dependencies
         run: |
-          cd daily_stock_analysis && pip install -e .
-          cd ../AlphaSift && pip install -e .
-          cd ../AlphaEvo && pip install -e .
+          cd daily_stock_analysis
+          pip install -r requirements.txt
+          pip install -e .
+          pip install fake_useragent sqlalchemy
+          cd ../alphasift
+          pip install -e .
 
       - name: AlphaSift 全市场扫描
         env:
@@ -29,17 +32,18 @@ jobs:
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
         run: |
-          cd AlphaSift
-          alphasift screen balanced_alpha --no-llm --save-run
+          cd alphasift
+          alphasift screen balanced_alpha --no-llm --save-run --market cn
           mkdir -p ../shared
-          cp runs/*.json ../shared/candidates.json 2>/dev/null || echo '[]' > ../shared/candidates.json
+          cp data/runs/*.json ../shared/candidates.json 2>/dev/null || echo '{"picks":[]}' > ../shared/candidates.json
 
       - name: 解析选股结果并注入环境变量
         id: pass_stocks
         run: |
           if [ -f shared/candidates.json ] && [ -s shared/candidates.json ]; then
-            STOCKS=$(jq -r '.[] | .code' shared/candidates.json | tr '\n' ',' | sed 's/,$//')
+            STOCKS=$(jq -r '.picks[]? | .code' shared/candidates.json | head -10 | tr '\n' ',' | sed 's/,$//')
             echo "STOCK_LIST=$STOCKS" >> $GITHUB_ENV
+            echo "已提取股票列表: $STOCKS"
           else
             echo "STOCK_LIST=${{ secrets.STOCK_LIST }}" >> $GITHUB_ENV
           fi
@@ -53,29 +57,16 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
-          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
-          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
         run: |
           cd daily_stock_analysis
           python main.py
 
-      - name: AlphaEvo 策略回测与进化
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
-        run: |
-          cd AlphaEvo
-          alphaevo evolve rsi_reversion_v1 --method llm
-          alphaevo trajectory
-
-      - name: 上传所有报告
+      - name: 上传每日报告
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: quant-reports
+          name: daily-reports
           path: |
             daily_stock_analysis/reports/
-            AlphaSift/runs/
-            AlphaEvo/trajectory/
+            alphasift/data/runs/
             shared/
