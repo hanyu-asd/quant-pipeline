@@ -21,6 +21,7 @@ jobs:
         run: |
           cd alphaevo
           pip install -e .
+          pip install requests
 
       - name: 自动判断市场状态并选择策略（腾讯财经 API）
         id: select_strategy
@@ -35,7 +36,6 @@ jobs:
         run: |
           cd alphaevo
           STRATEGY="${{ env.SELECTED_STRATEGY }}"
-          # 如果策略文件在 builtin 目录下，复制到根目录
           if [ -f "strategies/builtin/${STRATEGY}.yaml" ]; then
             cp strategies/builtin/${STRATEGY}.yaml strategies/${STRATEGY}.yaml
             echo "✅ 已复制策略文件: ${STRATEGY}.yaml"
