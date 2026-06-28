@@ -2,7 +2,7 @@ name: 每日选股与分析
 
 on:
   schedule:
-    - cron: '30 10 * * 1-5'   # 工作日北京时间 18:30
+    - cron: '30 10 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: 禁用 Git 符号链接（避免 File name too long）
+      - name: 禁用 Git 符号链接
         run: git config --global core.symlinks false
 
       - uses: actions/checkout@v4
@@ -30,15 +30,27 @@ jobs:
           pip install -e .
           cd ../alphaevo
           pip install -e .
+          pip install requests baostock efinance akshare pandas numpy
 
       - name: AlphaSift 全市场扫描
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
         run: |
+          # 获取当前策略
+          cd ${{ github.workspace }}
+          if [ -f "market_state.json" ]; then
+            STRATEGY=$(jq -r '.strategy' market_state.json)
+          else
+            STRATEGY="balanced_alpha"
+          fi
+          echo "📊 当前策略: $STRATEGY"
+          
           cd alphasift
-          alphasift screen balanced_alpha --no-llm --save-run --market cn
+          if [ "$STRATEGY" == "trend_pullback_rebound" ] || [ "$STRATEGY" == "ma_crossover" ]; then
+            echo "📈 使用动量策略选股"
+            alphasift screen momentum_quality --no-llm --save-run --market cn
+          else
+            echo "⚖️ 使用均衡策略选股"
+            alphasift screen balanced_alpha --no-llm --save-run --market cn
+          fi
           mkdir -p ../shared
           cp data/runs/*.json ../shared/candidates.json 2>/dev/null || echo '{"picks":[]}' > ../shared/candidates.json
 
@@ -53,20 +65,115 @@ jobs:
             echo "STOCK_LIST=${{ secrets.STOCK_LIST }}" >> $GITHUB_ENV
           fi
 
+      - name: 每日市场状态判断
+        id: daily_strategy
+        run: |
+          cd ${{ github.workspace }}
+          python scripts/select_strategy.py
+          STRATEGY=$(cat selected_strategy.txt)
+          echo "SELECTED_STRATEGY=$STRATEGY" >> $GITHUB_ENV
+          echo "📊 今日市场状态: $(cat market_state.json | jq -r '.trend_desc')"
+          echo "📊 今日选定策略: $STRATEGY"
+          if [ -f "market_state.json" ]; then
+            mkdir -p daily_stock_analysis/reports/
+            cp market_state.json daily_stock_analysis/reports/market_state.json
+            echo "✅ 市场状态已同步"
+          fi
+
+      - name: 大盘舆情获取与验证
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          ANSPIRE_API_KEYS: ${{ secrets.ANSPIRE_API_KEYS }}
+        run: |
+          echo "📊 开始大盘舆情获取..."
+          python - << 'EOF'
+          import json
+          import os
+          import sys
+          import requests
+          
+          def get_sentiment_score():
+              # 使用 Tavily
+              api_key = os.environ.get('TAVILY_API_KEY')
+              if api_key:
+                  try:
+                      url = "https://api.tavily.com/search"
+                      headers = {"Authorization": f"Bearer {api_key}"}
+                      data = {"query": "A股 大盘 行情 政策 市场情绪", "max_results": 5}
+                      resp = requests.post(url, headers=headers, json=data, timeout=10)
+                      if resp.status_code == 200:
+                          results = resp.json().get('results', [])
+                          return calculate_score(results)
+                  except:
+                      pass
+              
+              # 如果 Tavily 失败，尝试博查
+              api_key = os.environ.get('BOCHA_API_KEYS')
+              if api_key:
+                  try:
+                      url = "https://open.bochaai.com/v1/search"
+                      headers = {"Authorization": f"Bearer {api_key}"}
+                      data = {"query": "A股 大盘 行情 政策", "max_results": 5}
+                      resp = requests.post(url, headers=headers, json=data, timeout=10)
+                      if resp.status_code == 200:
+                          results = resp.json().get('results', [])
+                          return calculate_score(results)
+                  except:
+                      pass
+              
+              return 0
+          
+          def calculate_score(results):
+              score = 0
+              positive = ["利好", "上涨", "突破", "回升", "政策支持", "降息", "降准", "乐观"]
+              negative = ["利空", "下跌", "跌破", "危机", "暴雷", "大跌", "恐慌", "战争"]
+              for item in results:
+                  content = item.get('content', '')
+                  for w in positive:
+                      if w in content:
+                          score += 5
+                  for w in negative:
+                      if w in content:
+                          score -= 5
+              return max(-100, min(100, score))
+          
+          sentiment_score = get_sentiment_score()
+          print(f"📊 舆情评分: {sentiment_score}")
+          
+          # 读取市场状态
+          with open('market_state.json', 'r') as f:
+              state = json.load(f)
+          state['sentiment_score'] = sentiment_score
+          if sentiment_score < -50:
+              state['sentiment_alert'] = '空仓预警'
+          elif sentiment_score < -40:
+              state['sentiment_alert'] = '偏空预警'
+          elif sentiment_score > 40:
+              state['sentiment_alert'] = '偏多确认'
+          else:
+              state['sentiment_alert'] = '中性'
+          with open('market_state.json', 'w') as f:
+              json.dump(state, f, indent=2)
+          EOF
+
       - name: daily_stock_analysis 深度分析
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
           STOCK_LIST: ${{ env.STOCK_LIST }}
+          EMAIL_ENABLED: false
+          NOTIFICATION_ENABLED: false
+          SEND_EMAIL: false
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
         run: |
           cd daily_stock_analysis
-          python main.py
+          python main.py --no-email 2>/dev/null || python main.py
 
-      - name: 计算候选股买卖价格（AlphaEvo 定价）
+      - name: 计算候选股买卖价格（个股级策略匹配）
         run: |
           cat > pricing_calculator.py << 'EOF'
           import yaml
@@ -75,7 +182,31 @@ jobs:
           import sys
           import requests
           from datetime import datetime
-
+          
+          INDUSTRY_FILE = "scripts/industry_mapping.json"
+          
+          def load_industry_mapping():
+              if not os.path.exists(INDUSTRY_FILE):
+                  return {}
+              try:
+                  with open(INDUSTRY_FILE, 'r', encoding='utf-8') as f:
+                      return json.load(f)
+              except:
+                  return {}
+          
+          def get_stock_strategy(stock_code):
+              data = load_industry_mapping()
+              if not data:
+                  return "rsi_reversion_v1"
+              mapping = data.get("mapping", {})
+              strategy_map = data.get("strategy_mapping", {})
+              default = data.get("default_strategy", "rsi_reversion_v1")
+              prefix = stock_code[:3] if len(stock_code) >= 3 else stock_code
+              for industry, codes in mapping.items():
+                  if prefix in codes or stock_code in codes:
+                      return strategy_map.get(industry, default)
+              return default
+          
           def load_market_state():
               state_file = "market_state.json"
               if not os.path.exists(state_file):
@@ -84,59 +215,38 @@ jobs:
                   try:
                       with open(state_file, 'r') as f:
                           state = json.load(f)
-                          strategy = state.get('strategy', 'rsi_reversion')
-                          print(f"📊 当前市场状态: {state.get('trend_desc', '未知')}")
-                          print(f"📊 使用策略: {strategy}")
-                          return strategy
-                  except Exception as e:
-                      print(f"⚠️ 读取市场状态失败: {e}")
-              print("⚠️ 未找到市场状态文件，使用默认策略: rsi_reversion")
-              return "rsi_reversion"
-
+                          print(f"📊 大盘策略: {state.get('strategy', 'rsi_reversion')}")
+                          return state
+                  except:
+                      pass
+              return {}
+          
           def load_candidates():
               candidates_file = "shared/candidates.json"
               if not os.path.exists(candidates_file):
-                  print("候选股文件不存在，跳过定价计算")
                   return []
               with open(candidates_file, 'r') as f:
                   data = json.load(f)
               picks = data.get('picks', [])
-              return [item['code'] for item in picks if 'code' in item]
-
+              return [{'code': item['code'], 'name': item.get('name', '')} for item in picks if 'code' in item]
+          
           def find_strategy_file(strategy_name):
-              """智能查找策略文件，尝试多种路径和名称变体"""
-              # 可能的文件名
-              possible_names = [
-                  strategy_name,
-                  strategy_name.replace('_v1', ''),
-                  "rsi_reversion",
-                  "rsi_reversion_v1"
-              ]
-              # 去重
-              possible_names = list(dict.fromkeys(possible_names))
-              
-              # 可能的目录
-              possible_dirs = [
-                  "alphaevo/strategies/builtin/",
-                  "alphaevo/strategies/"
-              ]
-              
+              possible_names = [strategy_name, "rsi_reversion", "rsi_reversion_v1"]
+              possible_dirs = ["alphaevo/strategies/builtin/", "alphaevo/strategies/"]
               for dir_path in possible_dirs:
                   for name in possible_names:
                       full_path = f"{dir_path}{name}.yaml"
                       if os.path.exists(full_path):
-                          print(f"✅ 找到策略文件: {full_path}")
                           return full_path
               return None
-
+          
           def load_strategy(strategy_name):
               strategy_file = find_strategy_file(strategy_name)
               if not strategy_file:
-                  print(f"⚠️ 未找到策略文件: {strategy_name}")
                   return None
               with open(strategy_file, 'r') as f:
                   return yaml.safe_load(f)
-
+          
           def get_stock_realtime_price(stock_code):
               try:
                   url = f"https://qt.gtimg.cn/q=sh{stock_code}"
@@ -148,125 +258,262 @@ jobs:
                   return None
               except:
                   return None
-
-          def calculate_pricing(strategy, stock_code):
-              current_price = get_stock_realtime_price(stock_code)
-              if current_price is None:
-                  return {"buy_price": 0, "stop_loss": 0, "take_profit": 0, "signal": "无法获取价格", "current_price": 0}
-
+          
+          def calculate_pricing(strategy, current_price):
+              if current_price is None or current_price == 0:
+                  return None
               exit_params = strategy.get('exit', {})
               stop_loss_pct = exit_params.get('stop_loss', {}).get('value', 0.05)
-              take_profit_pct = exit_params.get('take_profit', {}).get('value', 2.0)
-
-              buy_price = current_price * (1 - 0.02)
+              take_profit_rr = exit_params.get('take_profit', {}).get('value', 2.0)
+              buy_price = current_price * 0.98
               stop_loss = buy_price * (1 - stop_loss_pct)
-              take_profit = buy_price * (1 + take_profit_pct * 0.01)
-
-              signal = "观望"
-              if current_price <= buy_price:
-                  signal = "买入"
-              elif current_price >= take_profit:
-                  signal = "卖出"
-
+              take_profit_pct = stop_loss_pct * take_profit_rr
+              take_profit = buy_price * (1 + take_profit_pct)
               return {
-                  "buy_price": buy_price,
-                  "stop_loss": stop_loss,
-                  "take_profit": take_profit,
-                  "current_price": current_price,
-                  "signal": signal
+                  "buy_price": round(buy_price, 2),
+                  "stop_loss": round(stop_loss, 2),
+                  "take_profit": round(take_profit, 2),
+                  "current_price": round(current_price, 2)
               }
-
+          
           def main():
-              strategy_name = load_market_state()
+              market_state = load_market_state()
               candidates = load_candidates()
               if not candidates:
-                  print("没有候选股，定价计算跳过")
+                  print("没有候选股")
                   sys.exit(0)
-
-              strategy = load_strategy(strategy_name)
-              if not strategy:
-                  print(f"⚠️ 无法加载策略: {strategy_name}，尝试使用默认策略 rsi_reversion")
-                  strategy = load_strategy("rsi_reversion")
-                  if not strategy:
-                      print("❌ 无法加载任何策略，定价计算失败")
-                      sys.exit(1)
-
+              
               report_lines = [
-                  "📊 买卖价格参考",
-                  "=" * 50,
-                  f"使用策略: {strategy_name}",
+                  "📊 买卖价格参考（个股级策略匹配）",
+                  "=" * 60,
+                  f"大盘策略: {market_state.get('strategy', 'rsi_reversion')}",
                   f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                  "",
+                  "💡 说明：基于申万行业分类匹配策略",
                   ""
               ]
-
-              for code in candidates:
-                  pricing = calculate_pricing(strategy, code)
-                  if pricing.get("buy_price", 0) == 0:
-                      report_lines.append(f"股票代码: {code} → 无法获取价格")
+              
+              for item in candidates:
+                  code = item['code']
+                  name = item.get('name', '')
+                  strategy_name = get_stock_strategy(code)
+                  print(f"📊 {code} {name} → 策略: {strategy_name}")
+                  strategy = load_strategy(strategy_name)
+                  if not strategy:
+                      strategy = load_strategy("rsi_reversion")
+                  current_price = get_stock_realtime_price(code)
+                  pricing = calculate_pricing(strategy, current_price)
+                  if not pricing:
+                      report_lines.append(f"❌ {code} {name} → 无法获取价格")
                       continue
-
-                  report_lines.append(f"股票代码: {code}")
-                  report_lines.append(f"  当前价: {pricing['current_price']:.2f}")
-                  report_lines.append(f"  买入触发价: {pricing['buy_price']:.2f}")
-                  report_lines.append(f"  止损价: {pricing['stop_loss']:.2f}")
-                  report_lines.append(f"  止盈价: {pricing['take_profit']:.2f}")
-                  report_lines.append(f"  信号: {pricing['signal']}")
+                  report_lines.append(f"📈 {code} {name}")
+                  report_lines.append(f"   匹配策略: {strategy_name}")
+                  report_lines.append(f"   当前价: {pricing['current_price']:.2f}")
+                  report_lines.append(f"   参考买入价: {pricing['buy_price']:.2f}")
+                  report_lines.append(f"   止损价: {pricing['stop_loss']:.2f}")
+                  report_lines.append(f"   止盈价: {pricing['take_profit']:.2f}")
                   report_lines.append("")
-
+              
               with open("pricing.txt", "w", encoding="utf-8") as f:
                   f.write("\n".join(report_lines))
-              print("✅ 定价报告已生成: pricing.txt")
-
+              print("✅ 定价报告已生成")
+          
           if __name__ == "__main__":
               main()
           EOF
-
+          
           python pricing_calculator.py
 
-      - name: 发送买卖价格参考邮件
+      - name: 滚动验证与历史记录
+        run: |
+          cat > rollback_verify.py << 'EOF'
+          import json
+          import csv
+          import os
+          import sys
+          import requests
+          from datetime import datetime
+          
+          CSV_FILE = "shared/recommendations.csv"
+          
+          def get_stock_price(stock_code):
+              try:
+                  url = f"https://qt.gtimg.cn/q=sh{stock_code}"
+                  resp = requests.get(url, timeout=5)
+                  if resp.status_code == 200:
+                      parts = resp.text.split('~')
+                      if len(parts) > 3:
+                          return float(parts[3])
+                  return None
+              except:
+                  return None
+          
+          def load_candidates():
+              candidates_file = "shared/candidates.json"
+              if not os.path.exists(candidates_file):
+                  return []
+              with open(candidates_file, 'r') as f:
+                  data = json.load(f)
+              picks = data.get('picks', [])
+              return [{'code': item['code'], 'name': item.get('name', '')} for item in picks if 'code' in item]
+          
+          def main():
+              # 读取今日推荐
+              candidates = load_candidates()
+              if not candidates:
+                  print("没有推荐股票")
+                  return
+              
+              today = datetime.now().strftime("%Y-%m-%d")
+              
+              # 创建CSV文件（如果不存在）
+              file_exists = os.path.exists(CSV_FILE)
+              if not file_exists:
+                  with open(CSV_FILE, 'w', newline='', encoding='utf-8') as f:
+                      writer = csv.writer(f)
+                      writer.writerow(['推荐日期', '股票代码', '股票名称', '推荐价', 'T+1价', 'T+1涨跌幅', 'T+2价', 'T+2涨跌幅', 'T+3价', 'T+3涨跌幅', 'T+4价', 'T+4涨跌幅', 'T+5价', 'T+5涨跌幅', '是否止盈', '是否止损', '回顾状态'])
+              
+              # 追加今日推荐
+              with open(CSV_FILE, 'a', newline='', encoding='utf-8') as f:
+                  writer = csv.writer(f)
+                  for item in candidates:
+                      code = item['code']
+                      name = item.get('name', '')
+                      price = get_stock_price(code)
+                      writer.writerow([today, code, name, price, '', '', '', '', '', '', '', '', '', '', '否', '否', '跟踪中'])
+              
+              print(f"✅ 已记录 {len(candidates)} 只推荐股票")
+          EOF
+          
+          python rollback_verify.py
+
+      - name: 合并邮件发送（含历史回顾）
         env:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
         run: |
-          cat > send_pricing_email.py << 'EOF'
+          cat > send_combined_email.py << 'EOF'
           import smtplib
-          from email.mime.text import MIMEText
           import os
-
+          import glob
+          import re
+          import csv
+          import json
+          from email.mime.text import MIMEText
+          from datetime import datetime, timedelta
+          
           sender = os.environ.get('EMAIL_SENDER')
           password = os.environ.get('EMAIL_PASSWORD')
           receivers_str = os.environ.get('EMAIL_RECEIVERS', '')
           receivers = [r.strip() for r in receivers_str.split(',') if r.strip()]
-
+          
           if not sender or not password or not receivers:
               print("邮件配置不完整，跳过发送")
               exit(0)
-
+          
+          # 读取大盘复盘
+          market_content = ""
+          market_files = glob.glob("daily_stock_analysis/reports/market_review_*.md")
+          for f in sorted(market_files, reverse=True):
+              with open(f, 'r', encoding='utf-8') as file:
+                  market_content = file.read()
+                  break
+          
+          # 读取个股分析
+          stock_content = ""
+          stock_files = glob.glob("daily_stock_analysis/reports/*_analysis_*.md")
+          if not stock_files:
+              stock_files = glob.glob("daily_stock_analysis/reports/stock_*.md")
+          for f in sorted(stock_files, reverse=True):
+              with open(f, 'r', encoding='utf-8') as file:
+                  stock_content = file.read()
+                  break
+          
+          # 读取定价
+          pricing_content = ""
           try:
               with open('pricing.txt', 'r', encoding='utf-8') as f:
-                  content = f.read()
-          except FileNotFoundError:
-              content = "今日无候选股，无法生成买卖价格参考。"
-              print("pricing.txt 不存在，发送占位邮件")
-
-          subject = '📊 每日买卖价格参考'
-          msg = MIMEText(content, 'plain', 'utf-8')
+                  pricing_content = f.read()
+          except:
+              pass
+          
+          # 读取市场状态
+          market_state = {}
+          try:
+              with open('market_state.json', 'r', encoding='utf-8') as f:
+                  market_state = json.load(f)
+          except:
+              pass
+          
+          # 读取历史回顾
+          history_content = ""
+          try:
+              with open('shared/recommendations.csv', 'r', encoding='utf-8') as f:
+                  reader = csv.reader(f)
+                  rows = list(reader)
+                  if len(rows) > 1:
+                      history_content = "\n📊 历史推荐回顾\n" + "=" * 60 + "\n"
+                      # 取最近5条
+                      for row in rows[-6:]:
+                          if row[0] != '推荐日期':
+                              history_content += f"{row[1]} ({row[2]}) 推荐日：{row[0]}\n"
+                              history_content += f"  推荐价: {row[3]}\n"
+                              if row[5] and row[5] != '':
+                                  history_content += f"  T+1: {row[5]} ({row[6]}%)\n"
+                              if row[7] and row[7] != '':
+                                  history_content += f"  T+2: {row[7]} ({row[8]}%)\n"
+                              if row[9] and row[9] != '':
+                                  history_content += f"  T+3: {row[9]} ({row[10]}%)\n"
+                              if row[11] and row[11] != '':
+                                  history_content += f"  T+4: {row[11]} ({row[12]}%)\n"
+                              if row[13] and row[13] != '':
+                                  history_content += f"  T+5: {row[13]} ({row[14]}%)\n"
+                              status = "✅ 正常持有" if row[16] == "跟踪中" else "已结束"
+                              history_content += f"  状态: {status}\n\n"
+          except:
+              pass
+          
+          # 组装邮件
+          parts = []
+          if market_content:
+              parts.append("📊 大盘复盘报告\n" + "=" * 40 + "\n" + market_content)
+          
+          if market_state:
+              parts.append("📊 市场状态\n" + "=" * 40 + f"\n趋势: {market_state.get('trend_desc', '未知')}\n策略: {market_state.get('strategy', '未知')}\n舆情评分: {market_state.get('sentiment_score', 0)}")
+          
+          if stock_content:
+              parts.append("📈 今日推荐\n" + "=" * 40 + "\n" + stock_content)
+          
+          if pricing_content:
+              parts.append("📊 买卖价格参考\n" + "=" * 40 + "\n" + pricing_content)
+          
+          if history_content:
+              parts.append(history_content)
+          
+          if not parts:
+              print("没有可发送的内容")
+              exit(0)
+          
+          full_content = "\n\n---\n\n".join(parts)
+          
+          subject = f'📊 综合股票分析报告 - {datetime.now().strftime("%Y-%m-%d")}'
+          msg = MIMEText(full_content, 'plain', 'utf-8')
           msg['Subject'] = subject
           msg['From'] = sender
           msg['To'] = ', '.join(receivers)
-
+          
           try:
               with smtplib.SMTP_SSL('smtp.qq.com', 465) as server:
                   server.login(sender, password)
                   server.sendmail(sender, receivers, msg.as_string())
-              print("买卖价格参考邮件已发送")
+              print("✅ 合并邮件已发送")
           except Exception as e:
-              print(f"邮件发送失败: {e}")
+              print(f"❌ 邮件发送失败: {e}")
               exit(1)
           EOF
-
-          python send_pricing_email.py
+          
+          python send_combined_email.py
 
       - name: 上传每日报告
         uses: actions/upload-artifact@v4
