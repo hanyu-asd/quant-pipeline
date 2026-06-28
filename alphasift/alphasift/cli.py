@@ -12,7 +12,9 @@ from pathlib import Path
 
 from alphasift.audit import audit_project
 from alphasift.config import Config
-from alphasift.evaluate import evaluate_saved_run, evaluate_saved_runs
+from alphasift.doctor import doctor_data_sources, write_doctor_report
+from alphasift.dsa import check_dsa_readiness
+from alphasift.evaluate import evaluate_saved_run, evaluate_saved_runs, evaluate_saved_runs_by_windows
 from alphasift.hotspot import (
     append_hotspot_history,
     discover_hotspots,
@@ -140,6 +142,7 @@ def main():
         default=None,
         help="日 K 增强最多处理的候选数",
     )
+    sp.add_argument("--explain-filters", action="store_true", help="输出 hard filter waterfall 诊断")
     sp.add_argument("--save-run", action="store_true", help="保存本次运行到 ALPHASIFT_DATA_DIR/runs")
     sp.add_argument("--output", default=None, help="额外写出结果到指定路径")
     sp.add_argument("--jsonl", action="store_true", help="以 JSONL 输出")
@@ -173,6 +176,24 @@ def main():
     ebp.add_argument("--failed-breakout-pct", type=float, default=None, help="突破失败判定的最高收益百分比")
     ebp.add_argument("--with-price-path", action="store_true", help="额外抓取日 K 路径，计算最大回撤和最大浮盈")
     ebp.add_argument("--price-path-lookback-days", type=int, default=None, help="价格路径日 K 回看天数")
+
+    # evaluate-strategies
+    esp = sub.add_parser("evaluate-strategies", help="生成策略级评估 summary")
+    esp.add_argument("--limit", type=int, default=20, help="最多评估最近 N 个 run")
+    esp.add_argument("--strategy", default=None, help="只评估指定策略")
+    esp.add_argument("--output", default=None, help="额外写出策略评估 JSON 到指定路径")
+    esp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    esp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+    esp.add_argument("--cost-bps", type=float, default=None, help="评估收益扣除的往返成本，单位 bps")
+    esp.add_argument("--follow-through-pct", type=float, default=None, help="突破延续判定的最低收益百分比")
+    esp.add_argument("--failed-breakout-pct", type=float, default=None, help="突破失败判定的最高收益百分比")
+    esp.add_argument("--with-price-path", action="store_true", help="额外抓取日 K 路径，计算最大回撤和最大浮盈")
+    esp.add_argument("--price-path-lookback-days", type=int, default=None, help="价格路径日 K 回看天数")
+    esp.add_argument(
+        "--window",
+        default=None,
+        help="用逗号分隔多个窗口对价格路径进行滚动回看，例如 5,10,20；和 --price-path-lookback-days 互斥",
+    )
 
     # runs
     rp = sub.add_parser("runs", help="列出已保存的运行")
@@ -218,6 +239,25 @@ def main():
     ap = sub.add_parser("audit", help="评估项目能力、策略配置覆盖和已知短板")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出")
 
+    # doctor
+    dp = sub.add_parser("doctor", help="诊断运行环境和数据源")
+    doctor_sub = dp.add_subparsers(dest="doctor_command")
+    dsp = doctor_sub.add_parser("data-sources", help="诊断 snapshot / daily 数据源状态")
+    dsp.add_argument("--snapshot-source", action="append", default=None, help="snapshot 来源，可重复或逗号分隔")
+    dsp.add_argument("--daily-source", default=None, help="daily K 来源，默认使用 DAILY_SOURCE/config")
+    dsp.add_argument("--daily-code", default="000001", help="daily K smoke test 股票代码，默认 000001")
+    dsp.add_argument("--no-live", action="store_true", help="只输出配置和内存 health，不发起网络取数")
+    dsp.add_argument("--no-daily", action="store_true", help="跳过 daily K smoke test")
+    dsp.add_argument("--output", default=None, help="额外写出 JSON 诊断报告")
+    dsp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    dsp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+    drp = doctor_sub.add_parser("dsa-readiness", help="诊断可选 DSA 分析服务可用性")
+    drp.add_argument("--api-url", default=None, help="DSA base URL 或 analyze endpoint；默认读取 DSA_API_URL")
+    drp.add_argument("--timeout-sec", type=float, default=5.0, help="readiness probe 超时秒数")
+    drp.add_argument("--output", default=None, help="额外写出 JSON 诊断报告")
+    drp.add_argument("--json", action="store_true", help="以 JSON 输出")
+    drp.add_argument("--explain", action="store_true", help="输出紧凑可读摘要")
+
     # quickstart
     qp = sub.add_parser(
         "quickstart",
@@ -255,6 +295,7 @@ def main():
             post_analysis_max_picks=args.post_analysis_max_picks,
             daily_enrich=args.daily_enrich,
             daily_enrich_max_candidates=args.daily_enrich_max_candidates,
+            explain_filters=args.explain_filters,
             deep_analysis=args.deep_analysis,
             deep_analysis_max_picks=args.deep_analysis_max_picks,
             config=config,
@@ -323,6 +364,58 @@ def main():
             print(_format_evaluation_batch_explain(result))
         else:
             print(json.dumps(result, ensure_ascii=False, indent=2))
+
+    elif args.command == "evaluate-strategies":
+        config = Config.from_env()
+        try:
+            windows = _parse_window_list(args.window)
+        except ValueError as exc:
+            parser.error(str(exc))
+        if windows and args.price_path_lookback_days is not None:
+            parser.error("--window is incompatible with --price-path-lookback-days for this command")
+
+        if windows:
+            result = evaluate_saved_runs_by_windows(
+                windows=windows,
+                config=config,
+                limit=args.limit,
+                strategy=args.strategy,
+                cost_bps=args.cost_bps,
+                follow_through_pct=args.follow_through_pct,
+                failed_breakout_pct=args.failed_breakout_pct,
+            )
+        else:
+            result = evaluate_saved_runs(
+                config=config,
+                limit=args.limit,
+                strategy=args.strategy,
+                cost_bps=args.cost_bps,
+                follow_through_pct=args.follow_through_pct,
+                failed_breakout_pct=args.failed_breakout_pct,
+                with_price_path=args.with_price_path or None,
+                price_path_lookback_days=args.price_path_lookback_days,
+            )
+        payload = {
+            "evaluated_at": result.get("evaluated_at"),
+            "snapshot_source": result.get("snapshot_source"),
+            "source_errors": result.get("source_errors", []),
+            "limit": result.get("limit"),
+            "strategy_filter": result.get("strategy_filter", ""),
+            "cost_bps": result.get("cost_bps"),
+            "with_price_path": result.get("with_price_path"),
+            "price_path_window_days": result.get("price_path_window_days", []),
+            "strategy_summaries": result.get("strategy_summaries", []),
+        }
+        if args.output:
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        if args.explain or not args.json:
+            print(_format_evaluate_strategies_explain(payload))
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     elif args.command == "runs":
         config = Config.from_env()
@@ -457,6 +550,38 @@ def main():
             print(json.dumps(result, ensure_ascii=False, indent=2))
         else:
             print(_format_audit_explain(result))
+
+    elif args.command == "doctor":
+        config = Config.from_env()
+        if args.doctor_command == "data-sources":
+            result = doctor_data_sources(
+                config,
+                snapshot_sources=_split_csv_args(args.snapshot_source) or None,
+                daily_source=args.daily_source,
+                daily_code=args.daily_code,
+                run_live=not args.no_live,
+                check_daily=not args.no_daily,
+            )
+            if args.output:
+                write_doctor_report(args.output, result)
+            if args.json or not args.explain:
+                print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+            else:
+                print(_format_data_sources_doctor_explain(result.to_dict()))
+        elif args.doctor_command == "dsa-readiness":
+            result = check_dsa_readiness(
+                args.api_url if args.api_url is not None else config.dsa_api_url,
+                timeout_sec=args.timeout_sec,
+            )
+            if args.output:
+                Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+                Path(args.output).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            if args.json or not args.explain:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(_format_dsa_readiness_explain(result))
+        else:
+            parser.error("doctor requires a subcommand, e.g. doctor data-sources")
 
     elif args.command == "quickstart":
         _run_quickstart(strategy=args.strategy, max_output=args.max_output)
@@ -633,6 +758,62 @@ def _format_evaluation_batch_explain(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_evaluate_strategies_explain(result: dict) -> str:
+    lines = [
+        (
+            f"evaluated_at={result.get('evaluated_at')} "
+            f"source={result.get('snapshot_source') or '-'} "
+            f"limit={result.get('limit')} strategy_filter={result.get('strategy_filter') or '-'} "
+            f"price_path={result.get('with_price_path')}"
+        ),
+    ]
+    if result.get("price_path_window_days"):
+        windows = ",".join(f"{item}d" for item in result.get("price_path_window_days", []))
+        lines.append(f"windows={windows}")
+    if result.get("strategy_summaries", []) and isinstance(result.get("strategy_summaries"), list):
+        sample = result["strategy_summaries"][0]
+        if isinstance(sample, dict) and sample.get("window_summaries") is not None:
+            lines.append("strategy windows avg_return median_return win_rate max_dd max_runup failed_follow missing")
+        else:
+            lines.append(
+                "strategy runs picks avg_return median_return win_rate max_dd max_runup outcome shapes"
+            )
+    if result.get("source_errors"):
+        lines.append("source_errors=" + " | ".join(result["source_errors"]))
+    for item in result.get("strategy_summaries", []):
+        windows = item.get("window_summaries")
+        if windows:
+            line_parts = [
+                f"{item.get('strategy'):<20} "
+                f"{item.get('window_count', len(windows))!s:>3}w "
+            ]
+            for window in windows:
+                window_days = window.get("window_days", "-")
+                line_parts.append(
+                    (
+                        f"{window_days}d:" 
+                        f"ret={window.get('average_return_pct')!s} "
+                        f"win={window.get('win_rate')!s} "
+                        f"dd={window.get('average_max_drawdown_pct')!s} "
+                        f"runup={window.get('average_max_runup_pct')!s} "
+                        f"f={window.get('failed_breakout_count', 0)} "
+                        f"t={window.get('breakout_follow_through_count', 0)} "
+                        f"m={window.get('missing_count', 0)}; "
+                    )
+                )
+            lines.append("".join(line_parts).strip())
+        else:
+            shapes = item.get("shape_status_counts", {}) or {}
+            shape_text = ",".join(f"{name}:{count}" for name, count in sorted(shapes.items())) or "-"
+            lines.append(
+                f"{item.get('strategy'):<20} {item.get('run_count'):<4} {item.get('pick_count'):<5} "
+                f"{item.get('average_return_pct')!s:<10} {item.get('median_return_pct')!s:<13} "
+                f"{item.get('win_rate')!s:<8} {item.get('average_max_drawdown_pct')!s:<8} "
+                f"{item.get('average_max_runup_pct')!s:<9} {item.get('outcome'):<17} {shape_text}"
+            )
+    return "\n".join(lines)
+
+
 def _format_hotspots_explain(hotspots: list, *, provider: str = "") -> str:
     provider_text = getattr(hotspots, "provider_used", "") or provider or "-"
     metadata_bits = [f"hotspots={len(hotspots)}", f"provider={provider_text}", "schema_version=2"]
@@ -781,6 +962,47 @@ def _format_audit_explain(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_data_sources_doctor_explain(result: dict) -> str:
+    snapshot = result.get("snapshot", {}) or {}
+    daily = result.get("daily", {}) or {}
+    config = result.get("config", {}) or {}
+    lines = [
+        f"status={result.get('status')} generated_at={result.get('generated_at')}",
+        (
+            "snapshot "
+            f"status={snapshot.get('status')} source={snapshot.get('source') or '-'} "
+            f"rows={snapshot.get('rows', 0)} fallback={snapshot.get('fallback_used')} "
+            f"stale={snapshot.get('stale')} sources={','.join(snapshot.get('sources') or [])}"
+        ),
+    ]
+    if snapshot.get("errors"):
+        lines.append("snapshot_errors=" + " | ".join(str(item) for item in snapshot.get("errors") or []))
+    if daily:
+        lines.append(
+            "daily "
+            f"status={daily.get('status')} source={daily.get('source') or '-'} "
+            f"rows={daily.get('rows', 0)} stale={daily.get('stale')} "
+            f"code={config.get('daily_code') or '-'} requested={config.get('daily_source') or '-'}"
+        )
+        if daily.get("errors"):
+            lines.append("daily_errors=" + " | ".join(str(item) for item in daily.get("errors") or []))
+    lines.append(f"tushare_configured={config.get('tushare_configured')} live_checks={config.get('live_checks')}")
+    recommendations = result.get("recommendations") or []
+    if recommendations:
+        lines.append("recommendations=" + " | ".join(str(item) for item in recommendations))
+    return "\n".join(lines)
+
+
+def _format_dsa_readiness_explain(result: dict) -> str:
+    return "\n".join([
+        (
+            f"dsa status={result.get('status')} available={result.get('available')} "
+            f"endpoint={result.get('endpoint') or '-'} http_status={result.get('http_status')}"
+        ),
+        f"error={result.get('error') or '-'}",
+    ])
+
+
 def _write_industry_cache_metadata(
     output_path: Path,
     *,
@@ -909,6 +1131,28 @@ def _apply_env_file_args(env_files: list[str] | None) -> None:
     items = [item for item in existing.split(os.pathsep) if item]
     items.extend(env_files)
     os.environ["ALPHASIFT_ENV_FILES"] = os.pathsep.join(items)
+
+
+def _parse_window_list(raw: str | None) -> list[int] | None:
+    if raw is None:
+        return None
+    values: list[int] = []
+    seen: set[int] = set()
+    for item in str(raw).split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError as exc:
+            raise ValueError(f"Invalid --window value: {token}") from exc
+        if value <= 0:
+            raise ValueError("--window values must be positive integers")
+        if value in seen:
+            continue
+        seen.add(value)
+        values.append(value)
+    return sorted(values)
 
 
 def _split_csv_args(values: list[str] | None) -> list[str] | None:

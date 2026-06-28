@@ -6,6 +6,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -303,6 +304,7 @@ def evaluate_saved_runs(
         name: _aggregate_portfolios(items)
         for name, items in _group_by_strategy(evaluations).items()
     }
+    strategy_summaries = _strategy_summaries(evaluations)
     dimensions = {
         "by_sector": _aggregate_by_pick_label(evaluations, "llm_sector"),
         "by_theme": _aggregate_by_pick_label(evaluations, "llm_theme"),
@@ -329,8 +331,100 @@ def evaluate_saved_runs(
         "portfolio_summary": portfolio_summary,
         "by_strategy": by_strategy,
         "portfolio_by_strategy": portfolio_by_strategy,
+        "strategy_summaries": strategy_summaries,
         "dimensions": dimensions,
         "runs": [_evaluation_brief(item) for item in evaluations],
+    }
+
+
+
+def _normalize_price_windows(windows: list[int]) -> list[int]:
+    unique: list[int] = []
+    seen: set[int] = set()
+    for window in windows:
+        value = int(window)
+        if value <= 0:
+            continue
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return sorted(unique)
+
+
+def evaluate_saved_runs_by_windows(
+    *,
+    windows: list[int],
+    config: Config | None = None,
+    current_snapshot: pd.DataFrame | None = None,
+    limit: int = 20,
+    strategy: str | None = None,
+    cost_bps: float | None = None,
+    follow_through_pct: float | None = None,
+    failed_breakout_pct: float | None = None,
+) -> dict[str, Any]:
+    """Evaluate saved runs for multiple price-path windows."""
+    normalized_windows = _normalize_price_windows(windows)
+    if not normalized_windows:
+        normalized_windows = [30]
+
+    if config is None:
+        config = Config.from_env()
+
+    window_results: list[dict[str, Any]] = []
+    for window_days in normalized_windows:
+        window_results.append(
+            evaluate_saved_runs(
+                config=config,
+                current_snapshot=current_snapshot,
+                limit=limit,
+                strategy=strategy,
+                cost_bps=cost_bps,
+                follow_through_pct=follow_through_pct,
+                failed_breakout_pct=failed_breakout_pct,
+                with_price_path=True,
+                price_path_lookback_days=window_days,
+            )
+        )
+
+    merged: dict[str, list[dict[str, Any]]] = {}
+    for index, window_days in enumerate(normalized_windows):
+        for summary in window_results[index].get("strategy_summaries", []):
+            if not isinstance(summary, dict):
+                continue
+            strategy_name = str(summary.get("strategy", "unknown")) or "unknown"
+            merged.setdefault(strategy_name, []).append(
+                {
+                    "window_days": window_days,
+                    "average_return_pct": summary.get("average_return_pct"),
+                    "win_rate": summary.get("win_rate"),
+                    "average_max_drawdown_pct": summary.get("average_max_drawdown_pct"),
+                    "average_max_runup_pct": summary.get("average_max_runup_pct"),
+                    "failed_breakout_count": (summary.get("shape_status_counts", {}) or {}).get("failed_breakout", 0),
+                    "breakout_follow_through_count": (summary.get("shape_status_counts", {}) or {}).get("breakout_follow_through", 0),
+                    "missing_count": summary.get("missing_count", 0),
+                    "shape_status_counts": summary.get("shape_status_counts", {}),
+                    "pick_status_counts": summary.get("pick_status_counts", {}),
+                }
+            )
+
+    summary_by_strategy: list[dict[str, Any]] = []
+    for strategy_name, window_summaries in sorted(merged.items(), key=lambda item: item[0]):
+        window_summaries.sort(key=lambda item: int(item.get("window_days", 0)))
+        summary_by_strategy.append(
+            {
+                "strategy": strategy_name,
+                "window_count": len(window_summaries),
+                "window_summaries": window_summaries,
+            }
+        )
+
+    base_payload = window_results[0]
+    return {
+        **{k: base_payload[k] for k in base_payload if k != "strategy_summaries"},
+        "strategy_summaries": summary_by_strategy,
+        "price_path_window_days": normalized_windows,
+        "with_price_path": True,
     }
 
 
@@ -620,6 +714,61 @@ def _group_by_strategy(evaluations: list[EvaluationResult]) -> dict[str, list[Ev
     for item in evaluations:
         result.setdefault(item.strategy or "unknown", []).append(item)
     return result
+
+
+def _strategy_summaries(evaluations: list[EvaluationResult]) -> list[dict[str, object]]:
+    """Return stable per-strategy evaluation summaries for reports/UI."""
+    summaries: list[dict[str, object]] = []
+    for strategy, items in _group_by_strategy(evaluations).items():
+        aggregate = _aggregate_evaluations(items)
+        portfolio = _aggregate_portfolios(items)
+        shape_counts: dict[str, int] = {}
+        status_counts: dict[str, int] = {}
+        for evaluation in items:
+            for pick in evaluation.picks:
+                shape = str(pick.shape_status or "unknown")
+                shape_counts[shape] = shape_counts.get(shape, 0) + 1
+                status = str(pick.status or "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+        summaries.append({
+            "strategy": strategy,
+            "run_count": aggregate["run_count"],
+            "pick_count": aggregate["pick_count"],
+            "evaluated_pick_count": aggregate["evaluated_pick_count"],
+            "missing_count": aggregate["missing_count"],
+            "average_return_pct": aggregate["average_return_pct"],
+            "median_return_pct": aggregate["median_return_pct"],
+            "win_rate": aggregate["win_rate"],
+            "average_max_drawdown_pct": aggregate["average_max_drawdown_pct"],
+            "average_max_runup_pct": aggregate["average_max_runup_pct"],
+            "average_portfolio_return_pct": portfolio["average_portfolio_return_pct"],
+            "portfolio_win_rate": portfolio["portfolio_win_rate"],
+            "shape_status_counts": dict(sorted(shape_counts.items())),
+            "pick_status_counts": dict(sorted(status_counts.items())),
+            "outcome": _strategy_outcome(aggregate),
+        })
+    return sorted(
+        summaries,
+        key=lambda item: (
+            item["average_return_pct"] is None,
+            -(float(item["average_return_pct"]) if item["average_return_pct"] is not None else -999999.0),
+            str(item["strategy"]),
+        ),
+    )
+
+
+def _strategy_outcome(summary: dict[str, object]) -> str:
+    avg = summary.get("average_return_pct")
+    win_rate = summary.get("win_rate")
+    if avg is None or win_rate is None:
+        return "insufficient_data"
+    avg_f = float(avg)
+    win_f = float(win_rate)
+    if avg_f > 0 and win_f >= 50:
+        return "positive"
+    if avg_f < 0 and win_f < 50:
+        return "negative"
+    return "mixed"
 
 
 def _aggregate_by_pick_label(
