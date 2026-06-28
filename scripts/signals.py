@@ -5,6 +5,7 @@
 技术面从指数数据计算，无需外部数据源
 """
 
+import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
@@ -103,7 +104,8 @@ def get_north_flow_signal():
             else:
                 return 0, f"北向平衡 {flow:.0f}亿"
     except Exception as e:
-        pass
+        sys.stderr.write(f"   ⚠️ 北向资金异常: {e}\n")
+        sys.stderr.flush()
     return 0, "北向资金: 数据获取失败"
 
 
@@ -133,7 +135,8 @@ def get_margin_balance_signal():
             else:
                 return 0, f"融资余额平稳 {change:.2f}%"
     except Exception as e:
-        pass
+        sys.stderr.write(f"   ⚠️ 融资余额异常: {e}\n")
+        sys.stderr.flush()
     return 0, "融资余额: 数据获取失败"
 
 
@@ -164,12 +167,13 @@ def get_market_sentiment_signal():
                 else:
                     return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
     except Exception as e:
-        pass
+        sys.stderr.write(f"   ⚠️ 市场情绪异常: {e}\n")
+        sys.stderr.flush()
     return 0, "市场情绪: 数据获取失败"
 
 
 # ============================================================
-# 综合信号汇总函数（核心修复）
+# 综合信号汇总函数（强制输出，确保日志可见）
 # ============================================================
 
 def aggregate_all_signals(sh_closes):
@@ -180,20 +184,23 @@ def aggregate_all_signals(sh_closes):
     all_details = []
     total_score = 0
     
-    # 1. 技术面（从指数数据计算）
+    # 1. 技术面
     tech_score, tech_details = aggregate_technical_signals(sh_closes)
     total_score += tech_score
     all_details.extend(tech_details)
-    print(f"  技术面评分: {tech_score}")
+    sys.stdout.write(f"  技术面评分: {tech_score}\n")
+    sys.stdout.flush()
     
     # 2. 资金面：北向资金
     try:
         north_score, north_desc = get_north_flow_signal()
         total_score += north_score * 20
         all_details.append(north_desc)
-        print(f"  北向资金: {north_desc}")
+        sys.stdout.write(f"  北向资金: {north_desc}\n")
+        sys.stdout.flush()
     except Exception as e:
-        print(f"  北向资金: 异常 ({e})")
+        sys.stderr.write(f"  北向资金: 异常 ({e})\n")
+        sys.stderr.flush()
         all_details.append("北向资金: 异常")
     
     # 3. 资金面：融资余额
@@ -201,9 +208,11 @@ def aggregate_all_signals(sh_closes):
         margin_score, margin_desc = get_margin_balance_signal()
         total_score += margin_score * 10
         all_details.append(margin_desc)
-        print(f"  融资余额: {margin_desc}")
+        sys.stdout.write(f"  融资余额: {margin_desc}\n")
+        sys.stdout.flush()
     except Exception as e:
-        print(f"  融资余额: 异常 ({e})")
+        sys.stderr.write(f"  融资余额: 异常 ({e})\n")
+        sys.stderr.flush()
         all_details.append("融资余额: 异常")
     
     # 4. 情绪面：涨跌家数
@@ -211,16 +220,19 @@ def aggregate_all_signals(sh_closes):
         sent_score, sent_desc = get_market_sentiment_signal()
         total_score += sent_score * 15
         all_details.append(sent_desc)
-        print(f"  市场情绪: {sent_desc}")
+        sys.stdout.write(f"  市场情绪: {sent_desc}\n")
+        sys.stdout.flush()
     except Exception as e:
-        print(f"  市场情绪: 异常 ({e})")
+        sys.stderr.write(f"  市场情绪: 异常 ({e})\n")
+        sys.stderr.flush()
         all_details.append("市场情绪: 异常")
     
+    sys.stdout.write(f"  综合评分: {total_score}\n")
+    sys.stdout.flush()
     return total_score, all_details
 
 
 if __name__ == "__main__":
-    # 测试用
     closes = [3000 + i for i in range(100)]
     score, details = aggregate_all_signals(closes)
     print(f"\n综合评分: {score}")
