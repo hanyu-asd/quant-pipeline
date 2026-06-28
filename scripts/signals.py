@@ -85,20 +85,14 @@ def aggregate_technical_signals(sh_closes):
 # ============================================================
 
 def get_north_flow_signal():
-    """
-    获取北向资金流向信号
-    数据源: AkShare
-    返回: (信号值, 描述)
-    """
+    """获取北向资金流向信号，返回 (信号值, 描述)"""
     try:
         import akshare as ak
         df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
         if df is not None and len(df) > 0:
             latest = df.iloc[-1]
-            # AkShare 返回的列名
             flow_col = '当日成交净买入' if '当日成交净买入' in df.columns else 'value'
             flow = latest.get(flow_col, 0)
-            # 处理字符串
             if isinstance(flow, str):
                 flow = float(flow.replace(',', ''))
             if flow > 50:
@@ -108,17 +102,12 @@ def get_north_flow_signal():
             else:
                 return 0, f"北向平衡 {flow:.0f}亿"
     except Exception as e:
-        print(f"⚠️ AkShare 获取北向资金失败: {e}")
-    
-    return 0, "北向资金数据获取失败"
+        pass
+    return 0, "北向资金: 数据获取失败"
 
 
 def get_margin_balance_signal():
-    """
-    获取融资余额变化信号
-    数据源: AkShare
-    返回: (信号值, 描述)
-    """
+    """获取融资余额变化信号，返回 (信号值, 描述)"""
     try:
         import akshare as ak
         end_date = datetime.now().strftime("%Y%m%d")
@@ -143,9 +132,8 @@ def get_margin_balance_signal():
             else:
                 return 0, f"融资余额平稳 {change:.2f}%"
     except Exception as e:
-        print(f"⚠️ AkShare 获取融资余额失败: {e}")
-    
-    return 0, "融资余额数据获取失败"
+        pass
+    return 0, "融资余额: 数据获取失败"
 
 
 # ============================================================
@@ -153,18 +141,13 @@ def get_margin_balance_signal():
 # ============================================================
 
 def get_market_sentiment_signal():
-    """
-    获取市场情绪信号（涨跌家数、涨停家数）
-    数据源: AkShare
-    返回: (信号值, 描述)
-    """
+    """获取市场情绪信号，返回 (信号值, 描述)"""
     try:
         import akshare as ak
         df = ak.stock_zh_a_spot_em()
         if df is not None and len(df) > 0:
             change_col = '涨跌幅'
             if change_col in df.columns:
-                # 转换为数值类型
                 df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
                 up = len(df[df[change_col] > 0])
                 down = len(df[df[change_col] < 0])
@@ -180,9 +163,8 @@ def get_market_sentiment_signal():
                 else:
                     return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
     except Exception as e:
-        print(f"⚠️ AkShare 获取情绪信号失败: {e}")
-    
-    return 0, "情绪信号获取失败"
+        pass
+    return 0, "市场情绪: 数据获取失败"
 
 
 # ============================================================
@@ -192,7 +174,7 @@ def get_market_sentiment_signal():
 def aggregate_all_signals(sh_closes):
     """
     汇总所有信号：技术面 + 资金面 + 情绪面
-    返回: 综合评分(整数), 详情列表
+    返回: 综合评分, 详情列表
     """
     all_details = []
     total_score = 0
@@ -206,26 +188,25 @@ def aggregate_all_signals(sh_closes):
     # 2. 资金面：北向资金
     north_score, north_desc = get_north_flow_signal()
     total_score += north_score * 20
-    all_details.append(f"北向资金: {north_desc}")
+    all_details.append(north_desc)
     print(f"  北向资金: {north_desc}")
     
     # 3. 资金面：融资余额
     margin_score, margin_desc = get_margin_balance_signal()
     total_score += margin_score * 10
-    all_details.append(f"融资余额: {margin_desc}")
+    all_details.append(margin_desc)
     print(f"  融资余额: {margin_desc}")
     
     # 4. 情绪面：涨跌家数
     sent_score, sent_desc = get_market_sentiment_signal()
     total_score += sent_score * 15
-    all_details.append(f"市场情绪: {sent_desc}")
+    all_details.append(sent_desc)
     print(f"  市场情绪: {sent_desc}")
     
     return total_score, all_details
 
 
 if __name__ == "__main__":
-    # 测试用
     closes = [3000 + i for i in range(100)]
     score, details = aggregate_all_signals(closes)
     print(f"\n综合评分: {score}")
