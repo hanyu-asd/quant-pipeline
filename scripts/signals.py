@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 
+
 # ============================================================
 # 技术面信号（从指数数据计算，无需额外数据源）
 # ============================================================
@@ -168,7 +169,7 @@ def get_market_sentiment_signal():
 
 
 # ============================================================
-# 综合信号汇总函数
+# 综合信号汇总函数（核心修复）
 # ============================================================
 
 def aggregate_all_signals(sh_closes):
@@ -186,27 +187,40 @@ def aggregate_all_signals(sh_closes):
     print(f"  技术面评分: {tech_score}")
     
     # 2. 资金面：北向资金
-    north_score, north_desc = get_north_flow_signal()
-    total_score += north_score * 20
-    all_details.append(north_desc)
-    print(f"  北向资金: {north_desc}")
+    try:
+        north_score, north_desc = get_north_flow_signal()
+        total_score += north_score * 20
+        all_details.append(north_desc)
+        print(f"  北向资金: {north_desc}")
+    except Exception as e:
+        print(f"  北向资金: 异常 ({e})")
+        all_details.append("北向资金: 异常")
     
     # 3. 资金面：融资余额
-    margin_score, margin_desc = get_margin_balance_signal()
-    total_score += margin_score * 10
-    all_details.append(margin_desc)
-    print(f"  融资余额: {margin_desc}")
+    try:
+        margin_score, margin_desc = get_margin_balance_signal()
+        total_score += margin_score * 10
+        all_details.append(margin_desc)
+        print(f"  融资余额: {margin_desc}")
+    except Exception as e:
+        print(f"  融资余额: 异常 ({e})")
+        all_details.append("融资余额: 异常")
     
     # 4. 情绪面：涨跌家数
-    sent_score, sent_desc = get_market_sentiment_signal()
-    total_score += sent_score * 15
-    all_details.append(sent_desc)
-    print(f"  市场情绪: {sent_desc}")
+    try:
+        sent_score, sent_desc = get_market_sentiment_signal()
+        total_score += sent_score * 15
+        all_details.append(sent_desc)
+        print(f"  市场情绪: {sent_desc}")
+    except Exception as e:
+        print(f"  市场情绪: 异常 ({e})")
+        all_details.append("市场情绪: 异常")
     
     return total_score, all_details
 
 
 if __name__ == "__main__":
+    # 测试用
     closes = [3000 + i for i in range(100)]
     score, details = aggregate_all_signals(closes)
     print(f"\n综合评分: {score}")
