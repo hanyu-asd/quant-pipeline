@@ -2,7 +2,7 @@ name: 每日选股与分析
 
 on:
   schedule:
-    - cron: '30 10 * * 1-5'
+    - cron: '30 10 * * 1-5'   # 工作日北京时间 18:30
   workflow_dispatch:
 
 jobs:
@@ -94,7 +94,7 @@ jobs:
           import requests
           
           def get_sentiment_score():
-              # 使用 Tavily
+              # 1. 尝试 Tavily（优先）
               api_key = os.environ.get('TAVILY_API_KEY')
               if api_key:
                   try:
@@ -104,11 +104,15 @@ jobs:
                       resp = requests.post(url, headers=headers, json=data, timeout=10)
                       if resp.status_code == 200:
                           results = resp.json().get('results', [])
-                          return calculate_score(results)
-                  except:
-                      pass
+                          if results:
+                              print(f"   ✅ Tavily 返回 {len(results)} 条结果")
+                              return calculate_score(results)
+                      else:
+                          print(f"   ⚠️ Tavily HTTP {resp.status_code}")
+                  except Exception as e:
+                      print(f"   ⚠️ Tavily 异常: {e}")
               
-              # 如果 Tavily 失败，尝试博查
+              # 2. 尝试博查（备选）
               api_key = os.environ.get('BOCHA_API_KEYS')
               if api_key:
                   try:
@@ -118,43 +122,100 @@ jobs:
                       resp = requests.post(url, headers=headers, json=data, timeout=10)
                       if resp.status_code == 200:
                           results = resp.json().get('results', [])
-                          return calculate_score(results)
+                          if results:
+                              print(f"   ✅ 博查返回 {len(results)} 条结果")
+                              return calculate_score(results)
+                      else:
+                          print(f"   ⚠️ 博查 HTTP {resp.status_code}")
+                  except Exception as e:
+                      print(f"   ⚠️ 博查异常: {e}")
+              
+              # 3. 尝试 Anspire（备选）
+              api_key = os.environ.get('ANSPIRE_API_KEYS')
+              if api_key:
+                  try:
+                      # Anspire 接口需确认具体端点
+                      print("   ⚠️ Anspire 暂未实现")
                   except:
                       pass
               
+              print("   ⚠️ 所有舆情源均失败，返回 0")
               return 0
           
           def calculate_score(results):
+              """从搜索结果中提取舆情评分（修复版）"""
               score = 0
-              positive = ["利好", "上涨", "突破", "回升", "政策支持", "降息", "降准", "乐观"]
-              negative = ["利空", "下跌", "跌破", "危机", "暴雷", "大跌", "恐慌", "战争"]
+              matched = 0
+              positive_words = [
+                  "利好", "上涨", "突破", "回升", "政策支持", "降息", "降准", "乐观", "看好", 
+                  "反弹", "企稳", "大涨", "新高", "历史新高", "放量", "增量", "资金流入",
+                  "提振", "支持", "刺激", "改善", "增持", "回购"
+              ]
+              negative_words = [
+                  "利空", "下跌", "跌破", "危机", "暴雷", "大跌", "恐慌", "战争", "风险", 
+                  "谨慎", "低迷", "暴跌", "新低", "历史新低", "资金流出", "减持",
+                  "打击", "冲击", "恶化", "下滑", "悲观", "压力", "预警"
+              ]
+              
               for item in results:
-                  content = item.get('content', '')
-                  for w in positive:
-                      if w in content:
-                          score += 5
-                  for w in negative:
-                      if w in content:
-                          score -= 5
+                  content = item.get('content', '') or item.get('raw_content', '')
+                  if not content:
+                      continue
+                  
+                  # 限制长度避免超时
+                  content = content[:3000]
+                  
+                  # 统计正面/负面词出现次数
+                  pos_count = sum(1 for w in positive_words if w in content)
+                  neg_count = sum(1 for w in negative_words if w in content)
+                  
+                  if pos_count > 0 or neg_count > 0:
+                      matched += 1
+                      # 每次匹配贡献 ±3 分，并根据匹配数量加权
+                      item_score = (pos_count - neg_count) * 2
+                      score += max(-15, min(15, item_score))
+              
+              # 如果没有任何匹配，尝试用标题补充判断
+              if matched == 0:
+                  for item in results:
+                      title = item.get('title', '')
+                      if title:
+                          for w in positive_words:
+                              if w in title:
+                                  score += 5
+                                  matched += 1
+                                  break
+                          for w in negative_words:
+                              if w in title:
+                                  score -= 5
+                                  matched += 1
+                                  break
+              
+              print(f"   📊 舆情评分: {score} (匹配 {matched} 条)")
               return max(-100, min(100, score))
           
           sentiment_score = get_sentiment_score()
-          print(f"📊 舆情评分: {sentiment_score}")
+          print(f"   ✅ 最终舆情评分: {sentiment_score}")
           
-          # 读取市场状态
+          # 读取市场状态，写入舆情信息
           with open('market_state.json', 'r') as f:
               state = json.load(f)
           state['sentiment_score'] = sentiment_score
           if sentiment_score < -50:
-              state['sentiment_alert'] = '空仓预警'
+              state['sentiment_alert'] = '⚠️ 空仓预警（舆情极度悲观）'
           elif sentiment_score < -40:
-              state['sentiment_alert'] = '偏空预警'
+              state['sentiment_alert'] = '⚠️ 偏空预警（舆情悲观）'
           elif sentiment_score > 40:
-              state['sentiment_alert'] = '偏多确认'
+              state['sentiment_alert'] = '✅ 偏多确认（舆情乐观）'
+          elif sentiment_score > 20:
+              state['sentiment_alert'] = '📈 偏多倾向'
+          elif sentiment_score < -20:
+              state['sentiment_alert'] = '📉 偏空倾向'
           else:
-              state['sentiment_alert'] = '中性'
+              state['sentiment_alert'] = '➖ 中性（舆情平稳）'
           with open('market_state.json', 'w') as f:
               json.dump(state, f, indent=2)
+          print("   ✅ 舆情评分已写入 market_state.json")
           EOF
 
       - name: daily_stock_analysis 深度分析
