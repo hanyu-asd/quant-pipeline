@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 信号采集模块：技术面、资金面、情绪面
-只使用免费、无需注册的数据源：efinance、AkShare
+资金面/情绪面数据源：AkShare（唯一，稳定）
+技术面从指数数据计算，无需外部数据源
 """
 
 import numpy as np
 import pandas as pd
-
+from datetime import datetime, timedelta
 
 # ============================================================
 # 技术面信号（从指数数据计算，无需额外数据源）
@@ -86,32 +87,20 @@ def aggregate_technical_signals(sh_closes):
 def get_north_flow_signal():
     """
     获取北向资金流向信号
-    数据源: efinance → AkShare
+    数据源: AkShare
     返回: (信号值, 描述)
     """
-    # 1. 尝试 efinance
-    try:
-        import efinance as ef
-        df = ef.stock.get_north_flow()
-        if df is not None and len(df) > 0:
-            latest = df.iloc[-1]
-            flow = latest['当日成交净买入'] if '当日成交净买入' in latest else 0
-            if flow > 50:
-                return 1, f"北向净流入 {flow:.0f}亿"
-            elif flow < -50:
-                return -1, f"北向净流出 {flow:.0f}亿"
-            else:
-                return 0, f"北向平衡 {flow:.0f}亿"
-    except Exception as e:
-        print(f"efinance 获取北向资金失败: {e}")
-    
-    # 2. 尝试 AkShare
     try:
         import akshare as ak
         df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
         if df is not None and len(df) > 0:
             latest = df.iloc[-1]
-            flow = latest['当日成交净买入'] if '当日成交净买入' in latest else 0
+            # AkShare 返回的列名
+            flow_col = '当日成交净买入' if '当日成交净买入' in df.columns else 'value'
+            flow = latest.get(flow_col, 0)
+            # 处理字符串
+            if isinstance(flow, str):
+                flow = float(flow.replace(',', ''))
             if flow > 50:
                 return 1, f"北向净流入 {flow:.0f}亿"
             elif flow < -50:
@@ -119,7 +108,7 @@ def get_north_flow_signal():
             else:
                 return 0, f"北向平衡 {flow:.0f}亿"
     except Exception as e:
-        print(f"AkShare 获取北向资金失败: {e}")
+        print(f"⚠️ AkShare 获取北向资金失败: {e}")
     
     return 0, "北向资金数据获取失败"
 
@@ -127,34 +116,26 @@ def get_north_flow_signal():
 def get_margin_balance_signal():
     """
     获取融资余额变化信号
-    数据源: efinance → AkShare
+    数据源: AkShare
     返回: (信号值, 描述)
     """
-    # 1. 尝试 efinance
-    try:
-        import efinance as ef
-        df = ef.stock.get_margin_trading()
-        if df is not None and len(df) > 1:
-            latest = df.iloc[-1]['融资余额']
-            prev = df.iloc[-2]['融资余额']
-            change = (latest - prev) / prev * 100 if prev > 0 else 0
-            if change > 1:
-                return 1, f"融资余额增加 {change:.2f}%"
-            elif change < -1:
-                return -1, f"融资余额减少 {change:.2f}%"
-            else:
-                return 0, f"融资余额平稳 {change:.2f}%"
-    except Exception as e:
-        print(f"efinance 获取融资余额失败: {e}")
-    
-    # 2. 尝试 AkShare
     try:
         import akshare as ak
-        df = ak.stock_margin_sse()
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+        df = ak.stock_margin_sse(start_date=start_date, end_date=end_date)
         if df is not None and len(df) > 1:
-            latest = df.iloc[-1]['融资余额']
-            prev = df.iloc[-2]['融资余额']
-            change = (latest - prev) / prev * 100 if prev > 0 else 0
+            df = df.sort_values('信用交易日期')
+            latest = df.iloc[-1]
+            prev = df.iloc[-2]
+            balance_col = '融资余额' if '融资余额' in df.columns else '融资余额(元)'
+            latest_balance = latest.get(balance_col, 0)
+            prev_balance = prev.get(balance_col, 0)
+            if isinstance(latest_balance, str):
+                latest_balance = float(latest_balance.replace(',', ''))
+            if isinstance(prev_balance, str):
+                prev_balance = float(prev_balance.replace(',', ''))
+            change = (latest_balance - prev_balance) / prev_balance * 100 if prev_balance > 0 else 0
             if change > 1:
                 return 1, f"融资余额增加 {change:.2f}%"
             elif change < -1:
@@ -162,7 +143,7 @@ def get_margin_balance_signal():
             else:
                 return 0, f"融资余额平稳 {change:.2f}%"
     except Exception as e:
-        print(f"AkShare 获取融资余额失败: {e}")
+        print(f"⚠️ AkShare 获取融资余额失败: {e}")
     
     return 0, "融资余额数据获取失败"
 
@@ -174,50 +155,32 @@ def get_margin_balance_signal():
 def get_market_sentiment_signal():
     """
     获取市场情绪信号（涨跌家数、涨停家数）
-    数据源: efinance → AkShare
+    数据源: AkShare
     返回: (信号值, 描述)
     """
-    # 1. 尝试 efinance
-    try:
-        import efinance as ef
-        df = ef.stock.get_realtime_quotes()
-        if df is not None and len(df) > 0:
-            up = len(df[df['涨跌幅'] > 0])
-            down = len(df[df['涨跌幅'] < 0])
-            total = len(df)
-            up_ratio = up / total * 100
-            limit_up = len(df[df['涨跌幅'] > 9.8])
-            limit_down = len(df[df['涨跌幅'] < -9.8])
-            
-            if up_ratio > 70 and limit_up > 50:
-                return 1, f"情绪高涨（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
-            elif up_ratio < 30 and limit_down > 50:
-                return -1, f"情绪恐慌（涨 {up_ratio:.0f}%，跌停 {limit_down} 家）"
-            else:
-                return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
-    except Exception as e:
-        print(f"efinance 获取情绪信号失败: {e}")
-    
-    # 2. 尝试 AkShare
     try:
         import akshare as ak
-        df = ak.stock_zh_a_spot()
+        df = ak.stock_zh_a_spot_em()
         if df is not None and len(df) > 0:
-            up = len(df[df['涨跌幅'] > 0])
-            down = len(df[df['涨跌幅'] < 0])
-            total = len(df)
-            up_ratio = up / total * 100
-            limit_up = len(df[df['涨跌幅'] > 9.8])
-            limit_down = len(df[df['涨跌幅'] < -9.8])
-            
-            if up_ratio > 70 and limit_up > 50:
-                return 1, f"情绪高涨（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
-            elif up_ratio < 30 and limit_down > 50:
-                return -1, f"情绪恐慌（涨 {up_ratio:.0f}%，跌停 {limit_down} 家）"
-            else:
-                return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
+            change_col = '涨跌幅'
+            if change_col in df.columns:
+                # 转换为数值类型
+                df[change_col] = pd.to_numeric(df[change_col], errors='coerce')
+                up = len(df[df[change_col] > 0])
+                down = len(df[df[change_col] < 0])
+                total = len(df)
+                up_ratio = up / total * 100
+                limit_up = len(df[df[change_col] > 9.8])
+                limit_down = len(df[df[change_col] < -9.8])
+                
+                if up_ratio > 70 and limit_up > 50:
+                    return 1, f"情绪高涨（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
+                elif up_ratio < 30 and limit_down > 50:
+                    return -1, f"情绪恐慌（涨 {up_ratio:.0f}%，跌停 {limit_down} 家）"
+                else:
+                    return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
     except Exception as e:
-        print(f"AkShare 获取情绪信号失败: {e}")
+        print(f"⚠️ AkShare 获取情绪信号失败: {e}")
     
     return 0, "情绪信号获取失败"
 
@@ -234,7 +197,7 @@ def aggregate_all_signals(sh_closes):
     all_details = []
     total_score = 0
     
-    # 1. 技术面
+    # 1. 技术面（从指数数据计算）
     tech_score, tech_details = aggregate_technical_signals(sh_closes)
     total_score += tech_score
     all_details.extend(tech_details)
