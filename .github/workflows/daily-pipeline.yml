@@ -84,14 +84,14 @@ jobs:
                   try:
                       with open(state_file, 'r') as f:
                           state = json.load(f)
-                          strategy = state.get('strategy', 'rsi_reversion_v1')
+                          strategy = state.get('strategy', 'rsi_reversion')
                           print(f"📊 当前市场状态: {state.get('trend_desc', '未知')}")
                           print(f"📊 使用策略: {strategy}")
                           return strategy
                   except Exception as e:
                       print(f"⚠️ 读取市场状态失败: {e}")
-              print("⚠️ 未找到市场状态文件，使用默认策略: rsi_reversion_v1")
-              return "rsi_reversion_v1"
+              print("⚠️ 未找到市场状态文件，使用默认策略: rsi_reversion")
+              return "rsi_reversion"
 
           def load_candidates():
               candidates_file = "shared/candidates.json"
@@ -103,13 +103,37 @@ jobs:
               picks = data.get('picks', [])
               return [item['code'] for item in picks if 'code' in item]
 
+          def find_strategy_file(strategy_name):
+              """智能查找策略文件，尝试多种路径和名称变体"""
+              # 可能的文件名
+              possible_names = [
+                  strategy_name,
+                  strategy_name.replace('_v1', ''),
+                  "rsi_reversion",
+                  "rsi_reversion_v1"
+              ]
+              # 去重
+              possible_names = list(dict.fromkeys(possible_names))
+              
+              # 可能的目录
+              possible_dirs = [
+                  "alphaevo/strategies/builtin/",
+                  "alphaevo/strategies/"
+              ]
+              
+              for dir_path in possible_dirs:
+                  for name in possible_names:
+                      full_path = f"{dir_path}{name}.yaml"
+                      if os.path.exists(full_path):
+                          print(f"✅ 找到策略文件: {full_path}")
+                          return full_path
+              return None
+
           def load_strategy(strategy_name):
-              strategy_file = f"alphaevo/strategies/builtin/{strategy_name}.yaml"
-              if not os.path.exists(strategy_file):
-                  strategy_file = f"alphaevo/strategies/{strategy_name}.yaml"
-                  if not os.path.exists(strategy_file):
-                      print(f"⚠️ 策略文件不存在: {strategy_file}")
-                      return None
+              strategy_file = find_strategy_file(strategy_name)
+              if not strategy_file:
+                  print(f"⚠️ 未找到策略文件: {strategy_name}")
+                  return None
               with open(strategy_file, 'r') as f:
                   return yaml.safe_load(f)
 
@@ -161,8 +185,8 @@ jobs:
 
               strategy = load_strategy(strategy_name)
               if not strategy:
-                  print(f"⚠️ 无法加载策略: {strategy_name}，使用默认策略")
-                  strategy = load_strategy("rsi_reversion_v1")
+                  print(f"⚠️ 无法加载策略: {strategy_name}，尝试使用默认策略 rsi_reversion")
+                  strategy = load_strategy("rsi_reversion")
                   if not strategy:
                       print("❌ 无法加载任何策略，定价计算失败")
                       sys.exit(1)
