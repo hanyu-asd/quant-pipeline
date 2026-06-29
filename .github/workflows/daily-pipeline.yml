@@ -110,9 +110,17 @@ jobs:
       - name: daily_stock_analysis 深度分析
         if: github.event.inputs.dry_run != 'true'
         env:
+          # === LLM 配置（魔塔社区 API） ===
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          # LiteLLM 官方变量名（必须）
+          OPENAI_API_BASE: ${{ secrets.OPENAI_BASE_URL }}
+          # 兼容变量（保留）
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          # 魔塔模型 ID
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          # LiteLLM 模型变量（直接使用魔塔模型 ID）
+          LITELLM_MODEL: ${{ secrets.OPENAI_MODEL }}
+          # === 其他配置 ===
           STOCK_LIST: ${{ env.STOCK_LIST }}
           EMAIL_ENABLED: false
           NOTIFICATION_ENABLED: false
