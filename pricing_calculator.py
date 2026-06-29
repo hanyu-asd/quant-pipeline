@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 买卖价格计算器 v2.0
-读取候选股，根据行业匹配策略，计算买入/止损/止盈价
+读取候选股，使用 Baostock 动态获取行业分类，计算买入/止损/止盈价
 支持：追涨/低吸区分、3层价格源、缓存机制
 """
 import yaml
@@ -11,31 +11,22 @@ import sys
 import requests
 from datetime import datetime, timedelta
 from scripts.logger import log
+from scripts.industry_fetcher import get_stock_strategy_config
 
 # ============================================================
 # 配置文件路径
 # ============================================================
-INDUSTRY_FILE = "scripts/industry_mapping.json"
 CANDIDATES_FILE = "shared/candidates.json"
 MARKET_STATE_FILE = "market_state.json"
 OUTPUT_FILE = "pricing.txt"
 CACHE_DIR = "cache"
 
-# ============================================================
-# 数据加载
-# ============================================================
-def load_industry_mapping():
-    if not os.path.exists(INDUSTRY_FILE):
-        log("WARNING", f"行业映射文件不存在: {INDUSTRY_FILE}")
-        return {}
-    try:
-        with open(INDUSTRY_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        log("ERROR", f"[load_industry_mapping] 加载失败: {e}")
-        return {}
 
+# ============================================================
+# 数据加载函数
+# ============================================================
 def load_market_state():
+    """加载市场状态"""
     state_file = MARKET_STATE_FILE
     if not os.path.exists(state_file):
         state_file = "daily_stock_analysis/reports/market_state.json"
@@ -49,7 +40,9 @@ def load_market_state():
             log("WARNING", f"[load_market_state] 加载失败: {e}")
     return {}
 
+
 def load_candidates():
+    """读取候选股列表"""
     if not os.path.exists(CANDIDATES_FILE):
         log("WARNING", f"候选股文件不存在: {CANDIDATES_FILE}")
         return []
@@ -68,35 +61,9 @@ def load_candidates():
         log("ERROR", f"[load_candidates] 读取失败: {e}")
         return []
 
-def get_stock_strategy_config(stock_code, industry_data):
-    """返回: (strategy_name, buy_bias, stop_loss_pct)"""
-    if not industry_data:
-        return "rsi_reversion_v1", 0.98, 0.05
-    
-    mapping = industry_data.get("mapping", {})
-    strategy_map = industry_data.get("strategy_mapping", {})
-    pricing_config = industry_data.get("pricing_config", {})
-    default_pricing = industry_data.get("default_pricing", {"buy_bias": 0.98, "stop_loss_pct": 0.05})
-    default_strategy = industry_data.get("default_strategy", "rsi_reversion_v1")
-    
-    prefix = stock_code[:3] if len(stock_code) >= 3 else stock_code
-    matched_industry = None
-    
-    for industry, codes in mapping.items():
-        if prefix in codes or stock_code in codes:
-            matched_industry = industry
-            break
-    
-    if matched_industry:
-        strategy = strategy_map.get(matched_industry, default_strategy)
-        pricing = pricing_config.get(matched_industry, default_pricing)
-        buy_bias = pricing.get("buy_bias", default_pricing.get("buy_bias", 0.98))
-        stop_loss_pct = pricing.get("stop_loss_pct", default_pricing.get("stop_loss_pct", 0.05))
-        return strategy, buy_bias, stop_loss_pct
-    
-    return default_strategy, default_pricing.get("buy_bias", 0.98), default_pricing.get("stop_loss_pct", 0.05)
 
 def find_strategy_file(strategy_name):
+    """查找策略文件"""
     possible_names = [strategy_name, "rsi_reversion_v1", "rsi_reversion"]
     possible_dirs = ["alphaevo/strategies/builtin/", "alphaevo/strategies/"]
     for dir_path in possible_dirs:
@@ -106,7 +73,9 @@ def find_strategy_file(strategy_name):
                 return full_path
     return None
 
+
 def load_strategy(strategy_name):
+    """加载策略 YAML 文件"""
     strategy_file = find_strategy_file(strategy_name)
     if not strategy_file:
         log("WARNING", f"[load_strategy] 策略文件不存在: {strategy_name}")
@@ -118,12 +87,14 @@ def load_strategy(strategy_name):
         log("ERROR", f"[load_strategy] 加载策略失败 {strategy_name}: {e}")
         return None
 
+
 # ============================================================
 # 价格获取（3层 + 缓存）
 # ============================================================
 def ensure_cache_dir():
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
+
 
 def get_cached_price(stock_code):
     ensure_cache_dir()
@@ -139,6 +110,7 @@ def get_cached_price(stock_code):
             pass
     return None
 
+
 def save_cache_price(stock_code, price):
     ensure_cache_dir()
     cache_file = f"{CACHE_DIR}/price_{stock_code}.json"
@@ -147,6 +119,7 @@ def save_cache_price(stock_code, price):
             json.dump({"date": datetime.now().strftime("%Y-%m-%d"), "price": price}, f)
     except:
         pass
+
 
 def get_price_tencent(stock_code):
     try:
@@ -170,6 +143,7 @@ def get_price_tencent(stock_code):
         log("WARNING", f"[get_price_tencent] {stock_code} 失败: {e}")
         return None
 
+
 def get_price_sina(stock_code):
     try:
         prefix = "sh" if stock_code.startswith('6') else "sz"
@@ -192,15 +166,16 @@ def get_price_sina(stock_code):
         log("WARNING", f"[get_price_sina] {stock_code} 失败: {e}")
         return None
 
+
 def get_price_baostock_cache(stock_code):
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+        prefix = "sh" if stock_code.startswith('6') else "sz"
         lg = bs.login()
         if lg.error_code != '0':
             return None
-        prefix = "sh" if stock_code.startswith('6') else "sz"
         rs = bs.query_history_k_data_plus(
             f"{prefix}.{stock_code}", "date,close",
             start_date=start_date, end_date=end_date,
@@ -219,6 +194,7 @@ def get_price_baostock_cache(stock_code):
     except Exception as e:
         log("WARNING", f"[get_price_baostock_cache] {stock_code} 失败: {e}")
         return None
+
 
 def get_stock_realtime_price(stock_code):
     # 1. 检查缓存
@@ -252,6 +228,7 @@ def get_stock_realtime_price(stock_code):
     log("ERROR", f"所有价格源均失败: {stock_code}")
     return None
 
+
 # ============================================================
 # 定价计算
 # ============================================================
@@ -273,15 +250,15 @@ def calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct):
         "take_profit_rr": take_profit_rr
     }
 
+
 # ============================================================
 # 主函数
 # ============================================================
 def main():
     log("INFO", "="*60)
-    log("INFO", "📊 买卖价格计算器 v2.0")
+    log("INFO", "📊 买卖价格计算器 v2.0 (Baostock 动态行业分类)")
     log("INFO", "="*60)
     
-    industry_data = load_industry_mapping()
     market_state = load_market_state()
     candidates = load_candidates()
     
@@ -309,7 +286,8 @@ def main():
         code = item['code']
         name = item.get('name', '')
         
-        strategy_name, buy_bias, stop_loss_pct = get_stock_strategy_config(code, industry_data)
+        # 使用 Baostock 动态获取行业并映射策略
+        strategy_name, buy_bias, stop_loss_pct = get_stock_strategy_config(code)
         log("INFO", f"{code} {name} → 策略: {strategy_name}, 买入偏移: {buy_bias}")
         
         strategy = load_strategy(strategy_name)
@@ -346,6 +324,7 @@ def main():
     log("INFO", f"✅ 定价报告已生成: {OUTPUT_FILE}")
     log("INFO", f"   成功: {success_count} 只, 失败: {fail_count} 只")
     log("INFO", "="*60)
+
 
 if __name__ == "__main__":
     main()
