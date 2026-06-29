@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 信号采集模块：技术面、资金面、情绪面
-资金面/情绪面数据源：AkShare（唯一，稳定）
-技术面从指数数据计算，无需外部数据源
+资金面/情绪面数据源：AkShare
 """
 
 import sys
@@ -12,11 +11,10 @@ from datetime import datetime, timedelta
 
 
 # ============================================================
-# 技术面信号（从指数数据计算，无需额外数据源）
+# 技术面信号
 # ============================================================
 
 def calculate_momentum_signal(closes, lookback=20):
-    """动量信号：近20日涨跌幅"""
     if len(closes) < lookback:
         return 0
     ret = (closes[-1] / closes[-lookback] - 1) * 100
@@ -29,7 +27,6 @@ def calculate_momentum_signal(closes, lookback=20):
 
 
 def calculate_breadth_signal(closes, lookback=20):
-    """市场宽度：价格在MA20上方的比例"""
     if len(closes) < lookback:
         return 50
     ma20 = sum(closes[-lookback:]) / lookback
@@ -38,7 +35,6 @@ def calculate_breadth_signal(closes, lookback=20):
 
 
 def calculate_volatility_signal(closes, lookback=20):
-    """波动率信号"""
     if len(closes) < lookback:
         return 'normal'
     returns = [(closes[i] / closes[i-1] - 1) * 100 for i in range(1, len(closes))]
@@ -53,11 +49,9 @@ def calculate_volatility_signal(closes, lookback=20):
 
 
 def aggregate_technical_signals(sh_closes):
-    """汇总技术面信号"""
     momentum = calculate_momentum_signal(sh_closes, 20)
     breadth = calculate_breadth_signal(sh_closes, 20)
     volatility = calculate_volatility_signal(sh_closes, 20)
-    
     score = 0
     details = []
     if momentum == 1:
@@ -68,7 +62,6 @@ def aggregate_technical_signals(sh_closes):
         details.append("动量弱势 (-30)")
     else:
         details.append("动量中性 (0)")
-    
     if breadth >= 70:
         score += 20
         details.append(f"宽度强势 ({breadth:.0f}% +20)")
@@ -77,24 +70,21 @@ def aggregate_technical_signals(sh_closes):
     else:
         score -= 20
         details.append(f"宽度弱势 ({breadth:.0f}% -20)")
-    
     details.append(f"波动: {volatility}")
     return score, details
 
 
 # ============================================================
-# 资金面信号（北向资金 + 融资余额）
+# 资金面信号
 # ============================================================
 
 def get_north_flow_signal():
-    """获取北向资金流向信号，返回 (信号值, 描述)"""
     try:
         import akshare as ak
         df = ak.stock_hsgt_north_net_flow_in_em(symbol="北上")
         if df is not None and len(df) > 0:
             latest = df.iloc[-1]
-            flow_col = '当日成交净买入' if '当日成交净买入' in df.columns else 'value'
-            flow = latest.get(flow_col, 0)
+            flow = latest.get('当日成交净买入', 0)
             if isinstance(flow, str):
                 flow = float(flow.replace(',', ''))
             if flow > 50:
@@ -105,12 +95,10 @@ def get_north_flow_signal():
                 return 0, f"北向平衡 {flow:.0f}亿"
     except Exception as e:
         sys.stderr.write(f"   ⚠️ 北向资金异常: {e}\n")
-        sys.stderr.flush()
     return 0, "北向资金: 数据获取失败"
 
 
 def get_margin_balance_signal():
-    """获取融资余额变化信号，返回 (信号值, 描述)"""
     try:
         import akshare as ak
         end_date = datetime.now().strftime("%Y%m%d")
@@ -136,16 +124,14 @@ def get_margin_balance_signal():
                 return 0, f"融资余额平稳 {change:.2f}%"
     except Exception as e:
         sys.stderr.write(f"   ⚠️ 融资余额异常: {e}\n")
-        sys.stderr.flush()
     return 0, "融资余额: 数据获取失败"
 
 
 # ============================================================
-# 情绪面信号（涨跌家数 + 涨停家数）
+# 情绪面信号
 # ============================================================
 
 def get_market_sentiment_signal():
-    """获取市场情绪信号，返回 (信号值, 描述)"""
     try:
         import akshare as ak
         df = ak.stock_zh_a_spot_em()
@@ -159,7 +145,6 @@ def get_market_sentiment_signal():
                 up_ratio = up / total * 100
                 limit_up = len(df[df[change_col] > 9.8])
                 limit_down = len(df[df[change_col] < -9.8])
-                
                 if up_ratio > 70 and limit_up > 50:
                     return 1, f"情绪高涨（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
                 elif up_ratio < 30 and limit_down > 50:
@@ -168,30 +153,23 @@ def get_market_sentiment_signal():
                     return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
     except Exception as e:
         sys.stderr.write(f"   ⚠️ 市场情绪异常: {e}\n")
-        sys.stderr.flush()
     return 0, "市场情绪: 数据获取失败"
 
 
 # ============================================================
-# 综合信号汇总函数（强制输出，确保日志可见）
+# 综合信号汇总
 # ============================================================
 
 def aggregate_all_signals(sh_closes):
-    """
-    汇总所有信号：技术面 + 资金面 + 情绪面
-    返回: 综合评分, 详情列表
-    """
     all_details = []
     total_score = 0
     
-    # 1. 技术面
     tech_score, tech_details = aggregate_technical_signals(sh_closes)
     total_score += tech_score
     all_details.extend(tech_details)
     sys.stdout.write(f"  技术面评分: {tech_score}\n")
     sys.stdout.flush()
     
-    # 2. 资金面：北向资金
     try:
         north_score, north_desc = get_north_flow_signal()
         total_score += north_score * 20
@@ -200,10 +178,8 @@ def aggregate_all_signals(sh_closes):
         sys.stdout.flush()
     except Exception as e:
         sys.stderr.write(f"  北向资金: 异常 ({e})\n")
-        sys.stderr.flush()
         all_details.append("北向资金: 异常")
     
-    # 3. 资金面：融资余额
     try:
         margin_score, margin_desc = get_margin_balance_signal()
         total_score += margin_score * 10
@@ -212,10 +188,8 @@ def aggregate_all_signals(sh_closes):
         sys.stdout.flush()
     except Exception as e:
         sys.stderr.write(f"  融资余额: 异常 ({e})\n")
-        sys.stderr.flush()
         all_details.append("融资余额: 异常")
     
-    # 4. 情绪面：涨跌家数
     try:
         sent_score, sent_desc = get_market_sentiment_signal()
         total_score += sent_score * 15
@@ -224,7 +198,6 @@ def aggregate_all_signals(sh_closes):
         sys.stdout.flush()
     except Exception as e:
         sys.stderr.write(f"  市场情绪: 异常 ({e})\n")
-        sys.stderr.flush()
         all_details.append("市场情绪: 异常")
     
     sys.stdout.write(f"  综合评分: {total_score}\n")
@@ -236,6 +209,5 @@ if __name__ == "__main__":
     closes = [3000 + i for i in range(100)]
     score, details = aggregate_all_signals(closes)
     print(f"\n综合评分: {score}")
-    print("详情:")
     for d in details:
         print(f"  {d}")

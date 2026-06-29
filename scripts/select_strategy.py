@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-双窗口趋势判断 + 多信号验证 + 申万行业分类匹配
-版本：v5.0（最终版）
+双窗口趋势判断 + 主线识别 + 策略选择
+版本：v6.0（集成动态主线识别）
 """
 
 import requests
@@ -10,129 +10,9 @@ import re
 import os
 import sys
 from datetime import datetime, timedelta
+from identify_mainline import identify_mainline
 
 STATE_FILE = "trend_state.json"
-INDUSTRY_FILE = "scripts/industry_mapping.json"
-
-
-# ============================================================
-# 行业分类加载
-# ============================================================
-
-def load_industry_mapping():
-    """加载申万行业分类表"""
-    if not os.path.exists(INDUSTRY_FILE):
-        print("⚠️ 行业分类表不存在，使用默认策略")
-        return {}
-    try:
-        with open(INDUSTRY_FILE, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            return data
-    except Exception as e:
-        print(f"⚠️ 加载行业分类表失败: {e}")
-        return {}
-
-
-def get_stock_strategy(stock_code):
-    """根据股票代码获取对应策略（申万行业分类）"""
-    data = load_industry_mapping()
-    if not data:
-        return "rsi_reversion_v1"
-    
-    mapping = data.get("mapping", {})
-    strategy_map = data.get("strategy_mapping", {})
-    default = data.get("default_strategy", "rsi_reversion_v1")
-    
-    # 提取代码前缀（前3位）
-    prefix = stock_code[:3] if len(stock_code) >= 3 else stock_code
-    
-    # 查找匹配的行业
-    for industry, codes in mapping.items():
-        if prefix in codes or stock_code in codes:
-            return strategy_map.get(industry, default)
-    
-    return default
-
-
-# ============================================================
-# 动态确认天数（强度阈值细分）
-# ============================================================
-
-def calculate_confirm_days(signal_strength):
-    """
-    根据信号强度动态计算确认天数
-    强信号（>85分）：1天确认
-    较强信号（75-85分）：1.5天确认（盘中验证）
-    中等信号（50-75分）：2天确认
-    弱信号（<50分）：3天确认
-    """
-    if signal_strength > 85:
-        return 1
-    elif signal_strength > 75:
-        return 2  # 1.5天，用2天近似
-    elif signal_strength > 50:
-        return 2
-    else:
-        return 3
-
-
-# ============================================================
-# 信号强度计算
-# ============================================================
-
-def calculate_signal_strength(total_score, consensus, tech_premium):
-    """综合计算信号强度"""
-    strength = 0
-    if total_score > 75:
-        strength += 40
-    elif total_score > 50:
-        strength += 25
-    else:
-        strength += 10
-    if consensus > 50:
-        strength += 30
-    elif consensus > 30:
-        strength += 15
-    else:
-        strength += 5
-    if tech_premium > 3:
-        strength += 10
-    return min(100, strength)
-
-
-# ============================================================
-# 仓位分配
-# ============================================================
-
-def get_position_advice(trend, signal_strength, sentiment_score):
-    """
-    根据市场状态、信号强度和舆情评分分配仓位
-    返回: (主策略%, 备用策略%, 防御%)
-    """
-    # 空仓条件
-    if signal_strength < 15 or sentiment_score < -50:
-        return 0, 0, 100
-    
-    # 上升趋势
-    if trend == "up":
-        if signal_strength > 75:
-            return 55, 30, 15
-        else:
-            return 50, 35, 15
-    
-    # 下降趋势
-    elif trend == "down":
-        if signal_strength < 50:
-            return 15, 25, 60
-        else:
-            return 30, 30, 40
-    
-    # 震荡
-    else:
-        if signal_strength > 50:
-            return 40, 35, 25
-        else:
-            return 30, 35, 35
 
 
 # ============================================================
@@ -236,26 +116,13 @@ def get_index_history_akshare(symbol, days=100):
 
 def get_index_data(symbol, days=100):
     if symbol in ["sh000001", "000001"]:
-        code_map = {
-            "baostock": "sh.000001",
-            "efinance": "000001",
-            "sina": "sh000001",
-            "tencent": "sh000001",
-            "akshare": "000001"
-        }
+        code_map = {"baostock": "sh.000001", "efinance": "000001", "sina": "sh000001", "tencent": "sh000001", "akshare": "000001"}
         name = "上证指数"
     elif symbol in ["sz399006", "399006"]:
-        code_map = {
-            "baostock": "sz.399006",
-            "efinance": "399006",
-            "sina": "sz399006",
-            "tencent": "sz399006",
-            "akshare": "399006"
-        }
+        code_map = {"baostock": "sz.399006", "efinance": "399006", "sina": "sz399006", "tencent": "sz399006", "akshare": "399006"}
         name = "创业板指"
     else:
         return None
-
     print(f"  正在获取 {name} 数据...")
     closes = get_index_history_baostock(code_map["baostock"], days)
     if closes:
@@ -281,47 +148,6 @@ def get_index_data(symbol, days=100):
     return None
 
 
-# ============================================================
-# 信号采集（简化版）
-# ============================================================
-
-def aggregate_all_signals(closes):
-    """汇总所有信号"""
-    if not closes or len(closes) < 20:
-        return 0, ["数据不足"]
-    
-    momentum = (closes[-1] / closes[-20] - 1) * 100
-    ma20 = sum(closes[-20:]) / 20
-    above_ma20 = sum(1 for c in closes[-20:] if c > ma20)
-    
-    tech_score = 0
-    details = []
-    
-    if momentum > 3:
-        tech_score += 30
-        details.append("动量强势 (+30)")
-    elif momentum < -3:
-        tech_score -= 30
-        details.append("动量弱势 (-30)")
-    else:
-        details.append("动量中性 (0)")
-    
-    if above_ma20 >= 14:
-        tech_score += 20
-        details.append(f"宽度强势 ({above_ma20}/20 +20)")
-    elif above_ma20 >= 10:
-        details.append(f"宽度中性 ({above_ma20}/20)")
-    else:
-        tech_score -= 20
-        details.append(f"宽度弱势 ({above_ma20}/20 -20)")
-    
-    return tech_score, details
-
-
-# ============================================================
-# 核心趋势判断
-# ============================================================
-
 def calculate_ma(closes, period):
     if len(closes) < period:
         return closes[-1]
@@ -337,117 +163,56 @@ def detect_trend(sh_closes, cy_closes):
     current = sh_closes[-1]
     momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
 
-    # 1. 双窗口基础判断
     if ma20 > ma60:
         long_trend = "up"
-        long_desc = f"MA20({ma20:.2f}) > MA60({ma60:.2f})"
     elif ma20 < ma60:
         long_trend = "down"
-        long_desc = f"MA20({ma20:.2f}) < MA60({ma60:.2f})"
     else:
         long_trend = "sideways"
-        long_desc = "MA20 ≈ MA60"
 
     if long_trend == "up" and momentum_20 < -3:
         base_trend = "sideways"
-        base_reason = f"中长期向上但短期动量偏弱（{momentum_20:.2f}%），暂判震荡"
     elif long_trend == "down" and momentum_20 > 3:
         base_trend = "sideways"
-        base_reason = f"中长期向下但短期动量偏强（{momentum_20:.2f}%），暂判震荡"
     elif long_trend == "up":
         base_trend = "up"
-        base_reason = f"中长期向上，短期动量 {momentum_20:.2f}%"
     elif long_trend == "down":
         base_trend = "down"
-        base_reason = f"中长期向下，短期动量 {momentum_20:.2f}%"
     else:
         base_trend = "sideways"
-        base_reason = "中长期方向不明"
 
-    # 2. 多信号综合评分
-    total_score, signal_details = aggregate_all_signals(sh_closes)
-    
-    # 3. 科技溢价
     tech_premium = 0
     if cy_closes and len(cy_closes) >= 20 and len(sh_closes) >= 20:
         ret_cy = (cy_closes[-1] / cy_closes[-20] - 1) * 100
         ret_sh = (sh_closes[-1] / sh_closes[-20] - 1) * 100
         tech_premium = round(ret_cy - ret_sh, 2)
 
-    # 4. 信号强度
-    signal_strength = abs(total_score)
-    confirm_days_needed = calculate_confirm_days(signal_strength)
-
-    # 5. 确认天数机制
-    prev_trend = "sideways"
-    confirm_days = 0
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, 'r') as f:
-                prev_state = json.load(f)
-                prev_trend = prev_state.get('trend', 'sideways')
-                confirm_days = prev_state.get('confirm_days', 0)
-                if prev_state.get('base_trend') != base_trend:
-                    confirm_days = 0
-        except:
-            pass
-
-    if base_trend == prev_trend:
-        confirm_days = min(confirm_days + 1, confirm_days_needed + 1)
-        if confirm_days >= confirm_days_needed:
-            final_trend = base_trend
-            final_reason = f"{base_reason}（已确认 {confirm_days}/{confirm_days_needed} 天）"
-        else:
-            final_trend = prev_trend
-            final_reason = f"{base_reason}（确认中 {confirm_days}/{confirm_days_needed} 天）"
-    else:
-        confirm_days = 0
-        final_trend = prev_trend
-        final_reason = f"{base_reason}（新状态确认第1天，需 {confirm_days_needed} 天确认）"
-
-    # 6. 策略选择
-    if final_trend == "up" and tech_premium > 3:
-        strategy = "trend_pullback_rebound"
-        reason = f"上升趋势 + 科技股强势（溢价 {tech_premium}%）"
-    elif final_trend == "up":
-        strategy = "ma_crossover"
-        reason = f"上升趋势（动量 {momentum_20:.2f}%）"
-    elif final_trend == "down":
-        strategy = "rsi_reversion_v1"
-        reason = "下降趋势（等待超跌反弹）"
-    else:
-        strategy = "rsi_reversion_v1"
-        reason = "震荡（均值回归）"
-
-    # 保存状态
-    state = {
-        "trend": final_trend,
-        "base_trend": base_trend,
-        "confirm_days": confirm_days,
-        "confirm_days_needed": confirm_days_needed,
-        "signal_strength": signal_strength,
-        "last_check": datetime.now().strftime("%Y-%m-%d"),
-        "ma20": ma20,
-        "ma60": ma60,
-        "momentum_20": momentum_20,
-        "tech_premium": tech_premium,
-        "total_score": total_score
-    }
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=2)
-
-    return final_trend, strategy, reason, final_reason, tech_premium, signal_details, confirm_days_needed
+    return base_trend, tech_premium, ma20, ma60, momentum_20, current
 
 
-# ============================================================
-# 主函数
-# ============================================================
+def get_position_advice(trend, market_state, confidence):
+    """根据市场状态分配仓位"""
+    if market_state == "extreme":
+        return 0, 0, 100, "极端模式，建议空仓观望"
+    if market_state == "high_risk":
+        return 30, 30, 40, "高风险模式，建议轻仓防守"
+    if trend == "up" and confidence > 70:
+        return 70, 20, 10, "上升趋势+主线明确，积极配置"
+    if trend == "up" and confidence > 50:
+        return 50, 30, 20, "上升趋势+主线模糊，适度配置"
+    if trend == "up":
+        return 40, 35, 25, "上升趋势无主线，均衡配置"
+    if trend == "sideways":
+        return 40, 35, 25, "震荡+无主线，均衡配置"
+    return 30, 30, 40, "下跌趋势，防守为主"
+
 
 def main():
     print("=" * 70)
-    print("📊 双窗口趋势判断 + 多信号验证（v5.0 - 最终版）")
+    print("📊 双窗口趋势判断 + 动态主线识别（v6.0）")
     print("=" * 70)
 
+    # 1. 获取指数数据
     sh_closes = get_index_data("sh000001", 100)
     if not sh_closes:
         print("⚠️ 无法获取指数数据，使用默认策略: rsi_reversion_v1")
@@ -457,37 +222,70 @@ def main():
 
     cy_closes = get_index_data("sz399006", 100)
     if not cy_closes:
-        print("⚠️ 无法获取创业板指数据，将使用上证指数替代")
         cy_closes = sh_closes
 
-    trend, strategy, reason, trend_reason, tech_premium, signal_details, confirm_days = detect_trend(sh_closes, cy_closes)
-
-    ma20 = calculate_ma(sh_closes, 20)
-    ma60 = calculate_ma(sh_closes, 60)
-    current = sh_closes[-1]
-    momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
+    # 2. 趋势判断
+    trend, tech_premium, ma20, ma60, momentum_20, current = detect_trend(sh_closes, cy_closes)
     trend_desc = {"up": "上升趋势", "down": "下降趋势", "sideways": "震荡"}.get(trend, "未知")
 
+    # 3. 大盘状态检测
+    if len(sh_closes) >= 20:
+        ret_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
+        if ret_20 < -7:
+            market_state = "extreme"
+        elif ret_20 < -4:
+            market_state = "high_risk"
+        else:
+            market_state = "normal"
+    else:
+        market_state = "normal"
+
+    # 4. 主线识别
+    print("\n📊 正在识别市场主线...")
+    main_group, main_strategy, confidence, confirm_days = identify_mainline()
+
+    # 5. 策略选择
+    if market_state == "extreme" or market_state == "high_risk":
+        strategy = "rsi_reversion_v1"
+        reason = f"{market_state}，使用防守策略"
+    elif main_group and confidence > 50:
+        strategy = main_strategy
+        reason = f"主线识别: {main_group}（置信度 {confidence:.0f}%）"
+    elif trend == "up" and tech_premium > 3:
+        strategy = "trend_pullback_rebound"
+        reason = f"上升趋势 + 科技溢价 {tech_premium:.2f}%"
+    elif trend == "up":
+        strategy = "ma_crossover"
+        reason = f"上升趋势（动量 {momentum_20:.2f}%）"
+    else:
+        strategy = "rsi_reversion_v1"
+        reason = f"{trend_desc}（均值回归）"
+
+    # 6. 仓位分配
+    main_pct, alt_pct, def_pct, pos_reason = get_position_advice(trend, market_state, confidence)
+
+    # 7. 输出
     print("")
     print("📊 分析结果:")
     print(f"  上证指数: {current:.2f}")
     print(f"  MA20: {ma20:.2f}")
     print(f"  MA60: {ma60:.2f}")
     print(f"  近20日动量: {momentum_20:.2f}%")
-    print(f"  科技溢价（创-上）: {tech_premium}%")
+    print(f"  科技溢价: {tech_premium:.2f}%")
+    print(f"  趋势: {trend_desc}")
+    print(f"  市场状态: {market_state}")
     print("")
-    print("📊 信号详情:")
-    for detail in signal_details:
-        print(f"  {detail}")
-    print("")
-    print(f"🎯 趋势判断: {trend_desc}")
-    print(f"📝 判断依据: {trend_reason}")
-    print(f"⏱️ 确认天数: {confirm_days} 天")
-    print("")
-    print(f"✅ 选定策略: {strategy}")
+    print(f"🎯 选定策略: {strategy}")
     print(f"📝 原因: {reason}")
+    print("")
+    print(f"💰 仓位建议:")
+    print(f"  主策略: {main_pct}%")
+    print(f"  备选: {alt_pct}%")
+    print(f"  防御: {def_pct}%")
+    print(f"  📌 {pos_reason}")
     print("=" * 70)
 
+    # 8. 保存结果
     with open("selected_strategy.txt", "w") as f:
         f.write(strategy)
 
@@ -497,13 +295,20 @@ def main():
         "trend_desc": trend_desc,
         "strategy": strategy,
         "reason": reason,
+        "market_state": market_state,
+        "main_group": main_group,
+        "confidence": confidence,
         "confirm_days": confirm_days,
+        "main_strategy": main_strategy,
+        "position_main": main_pct,
+        "position_alt": alt_pct,
+        "position_def": def_pct,
+        "position_reason": pos_reason,
         "current_price": current,
         "ma20": ma20,
         "ma60": ma60,
         "momentum_20": momentum_20,
-        "tech_premium": tech_premium,
-        "signal_summary": signal_details
+        "tech_premium": tech_premium
     }
     with open("market_state.json", "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
