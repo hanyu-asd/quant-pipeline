@@ -1,52 +1,39 @@
 #!/usr/bin/env python3
 """
 信号采集模块：技术面、资金面、情绪面
-资金面/情绪面数据源：AkShare
+v6.1 - 增强异常处理和日志
 """
-
 import sys
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
+from logger import log
 
-
-# ============================================================
-# 技术面信号
-# ============================================================
-
+# ---- 技术面 ----
 def calculate_momentum_signal(closes, lookback=20):
     if len(closes) < lookback:
         return 0
     ret = (closes[-1] / closes[-lookback] - 1) * 100
-    if ret > 5:
-        return 1
-    elif ret < -5:
-        return -1
-    else:
-        return 0
-
+    return 1 if ret > 5 else (-1 if ret < -5 else 0)
 
 def calculate_breadth_signal(closes, lookback=20):
     if len(closes) < lookback:
         return 50
     ma20 = sum(closes[-lookback:]) / lookback
-    above_count = sum(1 for c in closes[-lookback:] if c > ma20)
-    return above_count / lookback * 100
-
+    above = sum(1 for c in closes[-lookback:] if c > ma20)
+    return above / lookback * 100
 
 def calculate_volatility_signal(closes, lookback=20):
     if len(closes) < lookback:
         return 'normal'
-    returns = [(closes[i] / closes[i-1] - 1) * 100 for i in range(1, len(closes))]
-    recent_returns = returns[-lookback:]
-    vol = np.std(recent_returns) if len(recent_returns) > 0 else 0
+    returns = [(closes[i]/closes[i-1]-1)*100 for i in range(1, len(closes))]
+    recent = returns[-lookback:]
+    vol = np.std(recent) if recent else 0
     if vol > 2.5:
         return 'high'
     elif vol < 0.8:
         return 'low'
-    else:
-        return 'normal'
-
+    return 'normal'
 
 def aggregate_technical_signals(sh_closes):
     momentum = calculate_momentum_signal(sh_closes, 20)
@@ -61,7 +48,7 @@ def aggregate_technical_signals(sh_closes):
         score -= 30
         details.append("动量弱势 (-30)")
     else:
-        details.append("动量中性 (0)")
+        details.append("动量中性")
     if breadth >= 70:
         score += 20
         details.append(f"宽度强势 ({breadth:.0f}% +20)")
@@ -73,11 +60,7 @@ def aggregate_technical_signals(sh_closes):
     details.append(f"波动: {volatility}")
     return score, details
 
-
-# ============================================================
-# 资金面信号
-# ============================================================
-
+# ---- 资金面 ----
 def get_north_flow_signal():
     try:
         import akshare as ak
@@ -94,9 +77,8 @@ def get_north_flow_signal():
             else:
                 return 0, f"北向平衡 {flow:.0f}亿"
     except Exception as e:
-        sys.stderr.write(f"   ⚠️ 北向资金异常: {e}\n")
-    return 0, "北向资金: 数据获取失败"
-
+        log("WARNING", f"[get_north_flow_signal] 异常: {e}")
+    return 0, "北向数据获取失败"
 
 def get_margin_balance_signal():
     try:
@@ -108,14 +90,14 @@ def get_margin_balance_signal():
             df = df.sort_values('信用交易日期')
             latest = df.iloc[-1]
             prev = df.iloc[-2]
-            balance_col = '融资余额' if '融资余额' in df.columns else '融资余额(元)'
-            latest_balance = latest.get(balance_col, 0)
-            prev_balance = prev.get(balance_col, 0)
-            if isinstance(latest_balance, str):
-                latest_balance = float(latest_balance.replace(',', ''))
-            if isinstance(prev_balance, str):
-                prev_balance = float(prev_balance.replace(',', ''))
-            change = (latest_balance - prev_balance) / prev_balance * 100 if prev_balance > 0 else 0
+            bal_col = '融资余额' if '融资余额' in df.columns else '融资余额(元)'
+            latest_bal = latest.get(bal_col, 0)
+            prev_bal = prev.get(bal_col, 0)
+            if isinstance(latest_bal, str):
+                latest_bal = float(latest_bal.replace(',', ''))
+            if isinstance(prev_bal, str):
+                prev_bal = float(prev_bal.replace(',', ''))
+            change = (latest_bal - prev_bal)/prev_bal*100 if prev_bal > 0 else 0
             if change > 1:
                 return 1, f"融资余额增加 {change:.2f}%"
             elif change < -1:
@@ -123,13 +105,8 @@ def get_margin_balance_signal():
             else:
                 return 0, f"融资余额平稳 {change:.2f}%"
     except Exception as e:
-        sys.stderr.write(f"   ⚠️ 融资余额异常: {e}\n")
-    return 0, "融资余额: 数据获取失败"
-
-
-# ============================================================
-# 情绪面信号
-# ============================================================
+        log("WARNING", f"[get_margin_balance_signal] 异常: {e}")
+    return 0, "融资数据获取失败"
 
 def get_market_sentiment_signal():
     try:
@@ -142,68 +119,44 @@ def get_market_sentiment_signal():
                 up = len(df[df[change_col] > 0])
                 down = len(df[df[change_col] < 0])
                 total = len(df)
-                up_ratio = up / total * 100
+                up_ratio = up/total*100 if total>0 else 0
                 limit_up = len(df[df[change_col] > 9.8])
                 limit_down = len(df[df[change_col] < -9.8])
                 if up_ratio > 70 and limit_up > 50:
-                    return 1, f"情绪高涨（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
+                    return 1, f"情绪高涨（涨 {up_ratio:.0f}%，涨停 {limit_up}家）"
                 elif up_ratio < 30 and limit_down > 50:
-                    return -1, f"情绪恐慌（涨 {up_ratio:.0f}%，跌停 {limit_down} 家）"
+                    return -1, f"情绪恐慌（涨 {up_ratio:.0f}%，跌停 {limit_down}家）"
                 else:
-                    return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up} 家）"
+                    return 0, f"情绪平稳（涨 {up_ratio:.0f}%，涨停 {limit_up}家）"
     except Exception as e:
-        sys.stderr.write(f"   ⚠️ 市场情绪异常: {e}\n")
-    return 0, "市场情绪: 数据获取失败"
-
-
-# ============================================================
-# 综合信号汇总
-# ============================================================
+        log("WARNING", f"[get_market_sentiment_signal] 异常: {e}")
+    return 0, "情绪数据获取失败"
 
 def aggregate_all_signals(sh_closes):
-    all_details = []
     total_score = 0
-    
+    details = []
     tech_score, tech_details = aggregate_technical_signals(sh_closes)
     total_score += tech_score
-    all_details.extend(tech_details)
-    sys.stdout.write(f"  技术面评分: {tech_score}\n")
-    sys.stdout.flush()
+    details.extend(tech_details)
+    log("INFO", f"技术面评分: {tech_score}")
     
-    try:
-        north_score, north_desc = get_north_flow_signal()
-        total_score += north_score * 20
-        all_details.append(north_desc)
-        sys.stdout.write(f"  北向资金: {north_desc}\n")
-        sys.stdout.flush()
-    except Exception as e:
-        sys.stderr.write(f"  北向资金: 异常 ({e})\n")
-        all_details.append("北向资金: 异常")
+    north_score, north_desc = get_north_flow_signal()
+    total_score += north_score * 20
+    details.append(north_desc)
+    log("INFO", f"北向: {north_desc}")
     
-    try:
-        margin_score, margin_desc = get_margin_balance_signal()
-        total_score += margin_score * 10
-        all_details.append(margin_desc)
-        sys.stdout.write(f"  融资余额: {margin_desc}\n")
-        sys.stdout.flush()
-    except Exception as e:
-        sys.stderr.write(f"  融资余额: 异常 ({e})\n")
-        all_details.append("融资余额: 异常")
+    margin_score, margin_desc = get_margin_balance_signal()
+    total_score += margin_score * 10
+    details.append(margin_desc)
+    log("INFO", f"融资: {margin_desc}")
     
-    try:
-        sent_score, sent_desc = get_market_sentiment_signal()
-        total_score += sent_score * 15
-        all_details.append(sent_desc)
-        sys.stdout.write(f"  市场情绪: {sent_desc}\n")
-        sys.stdout.flush()
-    except Exception as e:
-        sys.stderr.write(f"  市场情绪: 异常 ({e})\n")
-        all_details.append("市场情绪: 异常")
+    sent_score, sent_desc = get_market_sentiment_signal()
+    total_score += sent_score * 15
+    details.append(sent_desc)
+    log("INFO", f"情绪: {sent_desc}")
     
-    sys.stdout.write(f"  综合评分: {total_score}\n")
-    sys.stdout.flush()
-    return total_score, all_details
-
+    log("INFO", f"综合评分: {total_score}")
+    return total_score, details
 
 if __name__ == "__main__":
     closes = [3000 + i for i in range(100)]

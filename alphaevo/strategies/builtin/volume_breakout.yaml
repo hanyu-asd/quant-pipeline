@@ -1,0 +1,33 @@
+# volume_breakout.yaml
+# 放量突破策略 - 趋势跟踪类
+# 用于 AlphaSift 扫描，同时供 AlphaEvo 进化
+
+entry:
+  buy_bias: 1.03
+  description: "放量突破确认后买入"
+  
+  - indicator: volume
+    condition: ">"
+    value: 1.5
+    period: 20
+    description: "成交量大于20日均量的1.5倍"
+  
+  - indicator: close
+    condition: ">"
+    value: 20
+    period: 20
+    description: "收盘价高于20日均线"
+  
+  - indicator: close
+    condition: ">"
+    value: 1
+    period: 1
+    description: "当日涨幅为正"
+
+exit:
+  stop_loss:
+    value: 0.06
+    description: "固定止损6%"
+  take_profit:
+    value: 2.0
+    description: "盈亏比2:1"

@@ -4,11 +4,27 @@ on:
   schedule:
     - cron: '30 10 * * 1-5'
   workflow_dispatch:
+    inputs:
+      strategy:
+        description: '指定策略名（不填则自动选择）'
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: '试运行模式（不发送邮件）'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   daily:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    
+    permissions:
+      contents: read
+      actions: read
+
     steps:
       - name: 禁用 Git 符号链接
         run: git config --global core.symlinks false
@@ -30,16 +46,22 @@ jobs:
           pip install -e .
           cd ../alphaevo
           pip install -e .
-          pip install requests baostock efinance akshare pandas numpy tushare
+          pip install requests baostock akshare pandas numpy tushare
 
       - name: 动态主线识别 + 策略选择
         id: mainline_strategy
         run: |
           cd ${{ github.workspace }}
-          python scripts/select_strategy.py
-          STRATEGY=$(cat selected_strategy.txt)
-          echo "SELECTED_STRATEGY=$STRATEGY" >> $GITHUB_ENV
-          echo "📊 选定策略: $STRATEGY"
+          if [ -n "${{ github.event.inputs.strategy }}" ]; then
+            echo "${{ github.event.inputs.strategy }}" > selected_strategy.txt
+            echo "SELECTED_STRATEGY=${{ github.event.inputs.strategy }}" >> $GITHUB_ENV
+            echo "📊 使用指定策略: ${{ github.event.inputs.strategy }}"
+          else
+            python scripts/select_strategy.py
+            STRATEGY=$(cat selected_strategy.txt)
+            echo "SELECTED_STRATEGY=$STRATEGY" >> $GITHUB_ENV
+            echo "📊 选定策略: $STRATEGY"
+          fi
           if [ -f "market_state.json" ]; then
             mkdir -p daily_stock_analysis/reports/
             cp market_state.json daily_stock_analysis/reports/market_state.json
@@ -47,14 +69,32 @@ jobs:
           fi
 
       - name: AlphaSift 全市场扫描
-        run: |
-          cd ${{ github.workspace }}
-          STRATEGY="${{ env.SELECTED_STRATEGY }}"
-          echo "📊 使用选股策略: $STRATEGY"
-          cd alphasift
-          alphasift screen $STRATEGY --no-llm --save-run --market cn
-          mkdir -p ../shared
-          cp data/runs/*.json ../shared/candidates.json 2>/dev/null || echo '{"picks":[]}' > ../shared/candidates.json
+        uses: nick-fields/retry@v3
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: |
+            cd ${{ github.workspace }}
+            STRATEGY="${{ env.SELECTED_STRATEGY }}"
+            case "$STRATEGY" in
+              rsi_reversion_v1)
+                ALPHA_STRATEGY="oversold_reversal"
+                ;;
+              trend_pullback_rebound)
+                ALPHA_STRATEGY="momentum_quality"
+                ;;
+              volume_breakout)
+                ALPHA_STRATEGY="volume_breakout"
+                ;;
+              *)
+                ALPHA_STRATEGY="$STRATEGY"
+                ;;
+            esac
+            echo "📊 AlphaSift 使用策略: $ALPHA_STRATEGY"
+            cd alphasift
+            alphasift screen $ALPHA_STRATEGY --no-llm --save-run --market cn
+            mkdir -p ../shared
+            cp data/runs/*.json ../shared/candidates.json 2>/dev/null || echo '{"picks":[]}' > ../shared/candidates.json
 
       - name: 解析选股结果并注入环境变量
         id: pass_stocks
@@ -68,6 +108,7 @@ jobs:
           fi
 
       - name: daily_stock_analysis 深度分析
+        if: github.event.inputs.dry_run != 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
@@ -83,158 +124,14 @@ jobs:
           cd daily_stock_analysis
           python main.py --no-email 2>/dev/null || python main.py
 
-      - name: 计算候选股买卖价格（个股级策略匹配）
+      - name: 计算候选股买卖价格
+        if: github.event.inputs.dry_run != 'true'
         run: |
-          cat > pricing_calculator.py << 'EOF'
-          import yaml
-          import json
-          import os
-          import sys
-          import requests
-          from datetime import datetime
-          
-          INDUSTRY_FILE = "scripts/industry_mapping.json"
-          
-          def load_industry_mapping():
-              if not os.path.exists(INDUSTRY_FILE):
-                  return {}
-              try:
-                  with open(INDUSTRY_FILE, 'r', encoding='utf-8') as f:
-                      return json.load(f)
-              except:
-                  return {}
-          
-          def get_stock_strategy(stock_code):
-              data = load_industry_mapping()
-              if not data:
-                  return "rsi_reversion_v1"
-              mapping = data.get("mapping", {})
-              strategy_map = data.get("strategy_mapping", {})
-              default = data.get("default_strategy", "rsi_reversion_v1")
-              prefix = stock_code[:3] if len(stock_code) >= 3 else stock_code
-              for industry, codes in mapping.items():
-                  if prefix in codes or stock_code in codes:
-                      return strategy_map.get(industry, default)
-              return default
-          
-          def load_market_state():
-              state_file = "market_state.json"
-              if not os.path.exists(state_file):
-                  state_file = "daily_stock_analysis/reports/market_state.json"
-              if os.path.exists(state_file):
-                  try:
-                      with open(state_file, 'r') as f:
-                          state = json.load(f)
-                          print(f"📊 大盘策略: {state.get('strategy', 'rsi_reversion')}")
-                          return state
-                  except:
-                      pass
-              return {}
-          
-          def load_candidates():
-              candidates_file = "shared/candidates.json"
-              if not os.path.exists(candidates_file):
-                  return []
-              with open(candidates_file, 'r') as f:
-                  data = json.load(f)
-              picks = data.get('picks', [])
-              return [{'code': item['code'], 'name': item.get('name', '')} for item in picks if 'code' in item]
-          
-          def find_strategy_file(strategy_name):
-              possible_names = [strategy_name, "rsi_reversion", "rsi_reversion_v1"]
-              possible_dirs = ["alphaevo/strategies/builtin/", "alphaevo/strategies/"]
-              for dir_path in possible_dirs:
-                  for name in possible_names:
-                      full_path = f"{dir_path}{name}.yaml"
-                      if os.path.exists(full_path):
-                          return full_path
-              return None
-          
-          def load_strategy(strategy_name):
-              strategy_file = find_strategy_file(strategy_name)
-              if not strategy_file:
-                  return None
-              with open(strategy_file, 'r') as f:
-                  return yaml.safe_load(f)
-          
-          def get_stock_realtime_price(stock_code):
-              try:
-                  url = f"https://qt.gtimg.cn/q=sh{stock_code}"
-                  response = requests.get(url, timeout=5)
-                  if response.status_code == 200:
-                      parts = response.text.split('~')
-                      if len(parts) > 3:
-                          return float(parts[3])
-                  return None
-              except:
-                  return None
-          
-          def calculate_pricing(strategy, current_price):
-              if current_price is None or current_price == 0:
-                  return None
-              exit_params = strategy.get('exit', {})
-              stop_loss_pct = exit_params.get('stop_loss', {}).get('value', 0.05)
-              take_profit_rr = exit_params.get('take_profit', {}).get('value', 2.0)
-              buy_price = current_price * 0.98
-              stop_loss = buy_price * (1 - stop_loss_pct)
-              take_profit_pct = stop_loss_pct * take_profit_rr
-              take_profit = buy_price * (1 + take_profit_pct)
-              return {
-                  "buy_price": round(buy_price, 2),
-                  "stop_loss": round(stop_loss, 2),
-                  "take_profit": round(take_profit, 2),
-                  "current_price": round(current_price, 2)
-              }
-          
-          def main():
-              market_state = load_market_state()
-              candidates = load_candidates()
-              if not candidates:
-                  print("没有候选股")
-                  sys.exit(0)
-              
-              report_lines = [
-                  "📊 买卖价格参考（个股级策略匹配）",
-                  "=" * 60,
-                  f"大盘策略: {market_state.get('strategy', 'rsi_reversion')}",
-                  f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                  "",
-                  "💡 说明：基于申万行业分类匹配策略",
-                  ""
-              ]
-              
-              for item in candidates:
-                  code = item['code']
-                  name = item.get('name', '')
-                  strategy_name = get_stock_strategy(code)
-                  print(f"📊 {code} {name} → 策略: {strategy_name}")
-                  strategy = load_strategy(strategy_name)
-                  if not strategy:
-                      strategy = load_strategy("rsi_reversion")
-                  current_price = get_stock_realtime_price(code)
-                  pricing = calculate_pricing(strategy, current_price)
-                  if not pricing:
-                      report_lines.append(f"❌ {code} {name} → 无法获取价格")
-                      continue
-                  report_lines.append(f"📈 {code} {name}")
-                  report_lines.append(f"   匹配策略: {strategy_name}")
-                  report_lines.append(f"   当前价: {pricing['current_price']:.2f}")
-                  report_lines.append(f"   参考买入价: {pricing['buy_price']:.2f}")
-                  report_lines.append(f"   止损价: {pricing['stop_loss']:.2f}")
-                  report_lines.append(f"   止盈价: {pricing['take_profit']:.2f}")
-                  report_lines.append("")
-              
-              with open("pricing.txt", "w", encoding="utf-8") as f:
-                  f.write("\n".join(report_lines))
-              print("✅ 定价报告已生成")
-          
-          if __name__ == "__main__":
-              main()
-          EOF
-          
+          cd ${{ github.workspace }}
           python pricing_calculator.py
 
       - name: 合并邮件发送
+        if: github.event.inputs.dry_run != 'true'
         env:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
@@ -332,9 +229,10 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: daily-reports
+          name: daily-reports-${{ github.run_number }}
           path: |
             daily_stock_analysis/reports/
             alphasift/data/runs/
             shared/
             pricing.txt
+          retention-days: 7
