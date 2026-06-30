@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.6 - 修正 TickFlow API 调用
+v6.7 - 修复 Baostock 会话调用，优化 TickFlow
 """
 import json
 import sys
@@ -12,35 +12,24 @@ from datetime import datetime, timedelta
 from logger import log
 
 # ============================================================
-# 配置：ETF赛道分组（稳定沪市ETF）
+# 配置：ETF赛道分组
 # ============================================================
 ETF_MAP = {
-    # 半导体
     "512480": {"name": "半导体ETF", "group": "半导体", "backup": "512760"},
     "512760": {"name": "芯片ETF", "group": "半导体", "backup": "512480"},
-    # AI算力
     "588000": {"name": "科创50ETF", "group": "AI算力", "backup": None},
     "515050": {"name": "5GETF", "group": "AI算力", "backup": None},
-    # 软件
     "515230": {"name": "信创ETF", "group": "软件", "backup": "512720"},
     "512720": {"name": "计算机ETF", "group": "软件", "backup": "515230"},
-    # 通信
     "515880": {"name": "通信ETF", "group": "通信", "backup": None},
-    # 光伏
     "515790": {"name": "光伏ETF", "group": "光伏", "backup": None},
     "516160": {"name": "新能源ETF", "group": "光伏", "backup": None},
-    # 新能源车
     "515030": {"name": "新能源车ETF", "group": "新能源车", "backup": None},
-    # 消费
     "512690": {"name": "酒ETF", "group": "消费", "backup": None},
-    # 医药
     "512010": {"name": "医药ETF", "group": "医药", "backup": None},
-    # 有色
     "512400": {"name": "有色ETF", "group": "有色", "backup": None},
-    # 金融
     "512800": {"name": "银行ETF", "group": "金融", "backup": None},
     "512880": {"name": "证券ETF", "group": "金融", "backup": None},
-    # 红利
     "512890": {"name": "红利低波ETF", "group": "红利", "backup": None},
     "515080": {"name": "中证红利ETF", "group": "红利", "backup": None},
 }
@@ -61,25 +50,19 @@ STRATEGY_MAP = {
 DEFAULT_STRATEGY = "balanced_alpha"
 
 ETF_STATUS = {}
-
-
 def init_etf_status():
     for code in ETF_MAP:
         ETF_STATUS[code] = {"fail_count": 0, "status": "active", "last_switch": None}
-
-
 init_etf_status()
 
 
 # ============================================================
-# ETF 数据源：TickFlow（正确 API）
+# 数据源：TickFlow（ETF）
 # ============================================================
 def get_etf_data_tickflow(code, days=80):
-    """使用 TickFlow 获取 ETF 日线数据（正确 API）"""
     try:
         from tickflow import TickFlow
         tf = TickFlow.free()
-        # 确定市场后缀
         market = 'SH' if code.startswith('6') else 'SZ'
         full_symbol = f"{code}.{market}"
         df = tf.klines.get(
@@ -91,12 +74,17 @@ def get_etf_data_tickflow(code, days=80):
         if df is not None and len(df) >= 60:
             df = df.sort_values('trade_date')
             return df['close'].values.tolist()
+        else:
+            log("DEBUG", f"TickFlow 返回数据不足: {len(df) if df is not None else 0}")
         return None
     except Exception as e:
         log("WARNING", f"[TickFlow] 获取 {code} 失败: {e}")
         return None
 
 
+# ============================================================
+# 备选数据源：Tushare, AkShare
+# ============================================================
 def get_etf_data_tushare(code, days=80):
     try:
         import tushare as ts
@@ -157,7 +145,11 @@ def get_benchmark_data(days=80):
         return None
 
 
-def _fetch_etf_from_baostock_with_session(code, days, bs_session):
+# ============================================================
+# 修复：Baostock ETF 获取（不再使用 connection 参数）
+# ============================================================
+def fetch_etf_from_baostock(code, days):
+    """直接使用已登录的全局会话获取数据（无 connection 参数）"""
     try:
         import baostock as bs
         prefix = "sh" if code.startswith('6') else "sz"
@@ -166,8 +158,7 @@ def _fetch_etf_from_baostock_with_session(code, days, bs_session):
         rs = bs.query_history_k_data_plus(
             f"{prefix}.{code}", "date,close",
             start_date=start_date, end_date=end_date,
-            frequency="d", adjustflag="3",
-            connection=bs_session
+            frequency="d", adjustflag="3"
         )
         if rs.error_code != '0':
             return None
@@ -176,26 +167,31 @@ def _fetch_etf_from_baostock_with_session(code, days, bs_session):
             return None
         return [float(x) for x in data['close'].tolist()]
     except Exception as e:
-        log("WARNING", f"[Baostock会话] 获取 {code} 失败: {e}")
+        log("WARNING", f"[Baostock] 获取 {code} 失败: {e}")
         return None
 
 
-def get_etf_data_with_fallback(code, days, bs_session=None):
-    # 1. Baostock 会话
-    if bs_session is not None:
-        closes = _fetch_etf_from_baostock_with_session(code, days, bs_session)
+def get_etf_data_with_fallback(code, days, bs_logged_in=False):
+    """
+    获取ETF数据：
+    1. 如果 Baostock 已登录，直接使用
+    2. 否则尝试 TickFlow → Tushare → AkShare
+    """
+    # 1. Baostock（优先，前提是已登录）
+    if bs_logged_in:
+        closes = fetch_etf_from_baostock(code, days)
         if closes:
-            log("DEBUG", f"  ✅ Baostock会话成功: {code}")
+            log("DEBUG", f"  ✅ Baostock成功: {code}")
             ETF_STATUS[code]["fail_count"] = 0
             ETF_STATUS[code]["status"] = "active"
             return closes
         else:
             ETF_STATUS[code]["fail_count"] += 1
-            log("WARNING", f"  Baostock会话获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
+            log("WARNING", f"  Baostock获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
     else:
-        log("WARNING", f"  无Baostock会话，跳过主源")
+        log("WARNING", "  Baostock未登录，跳过主源")
 
-    # 2. TickFlow
+    # 2. 尝试 TickFlow
     log("WARNING", f"  尝试TickFlow: {code}")
     closes = get_etf_data_tickflow(code, days)
     if closes:
@@ -237,6 +233,9 @@ def get_etf_data_with_fallback(code, days, bs_session=None):
     return None
 
 
+# ============================================================
+# 核心计算
+# ============================================================
 def calculate_relative_strength(etf_closes, benchmark_closes):
     if not etf_closes or not benchmark_closes or len(etf_closes) < 5 or len(benchmark_closes) < 5:
         return 0, 0, 0
@@ -263,20 +262,19 @@ def identify_mainline():
             "ranking": 0
         }
 
+    # 登录 Baostock（只登录一次，后续直接使用全局会话）
     import baostock as bs
     log("INFO", "登录Baostock获取ETF数据...")
     lg = bs.login()
-    if lg.error_code != '0':
+    bs_logged_in = (lg.error_code == '0')
+    if not bs_logged_in:
         log("WARNING", f"Baostock登录失败: {lg.error_msg}，将仅使用TickFlow/Tushare/AkShare")
-        bs_session = None
-    else:
-        bs_session = lg
 
     scores = []
     for code, info in ETF_MAP.items():
         if ETF_STATUS.get(code, {}).get("status") == "disabled":
             continue
-        etf = get_etf_data_with_fallback(code, 80, bs_session)
+        etf = get_etf_data_with_fallback(code, 80, bs_logged_in)
         if not etf:
             continue
         rs_5, rs_20, rs_60 = calculate_relative_strength(etf, benchmark)
@@ -289,7 +287,8 @@ def identify_mainline():
         })
         time.sleep(0.3)  # 频率控制
 
-    if bs_session is not None:
+    # 登出 Baostock（如果登录成功）
+    if bs_logged_in:
         bs.logout()
         log("INFO", "Baostock登出")
 
@@ -366,7 +365,7 @@ def identify_mainline():
 
     group_avg_all = {}
     for group in group_counts.keys():
-        gs = [s["combined"] for s in scores if s["group"] == group]
+        gs = [s["combined"] for s in scores if s["group"] == g]
         group_avg_all[group] = sum(gs) / len(gs) if gs else 0
     sorted_groups = sorted(group_avg_all.items(), key=lambda x: x[1], reverse=True)
     ranking = [g[0] for g in sorted_groups].index(main_group) + 1
