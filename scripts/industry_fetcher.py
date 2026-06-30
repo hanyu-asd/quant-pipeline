@@ -5,7 +5,7 @@
 """
 import json
 import os
-from logger import log
+from scripts.logger import log  # 修正导入路径
 
 CONFIG_FILE = "scripts/industry_mapping.json"
 
@@ -27,7 +27,6 @@ def _query_stock_industry_baostock(stock_code):
     try:
         import baostock as bs
         
-        # 判断市场前缀
         if stock_code.startswith(('6', '688')):
             code_with_prefix = f"sh.{stock_code}"
         elif stock_code.startswith(('0', '3')):
@@ -55,7 +54,6 @@ def _query_stock_industry_baostock(stock_code):
         row = rs.get_row_data()
         bs.logout()
 
-        # row: [updateDate, code, code_name, industry, industryClassification]
         if len(row) >= 4:
             industry = row[3]
             log("DEBUG", f"{stock_code} 行业: {industry}")
@@ -73,13 +71,11 @@ def _map_industry_to_category(industry, stock_code):
     config = _load_config()
     keyword_mapping = config.get('industry_keyword_mapping', {})
     
-    # 优先按行业关键词映射
     if industry:
         for keyword, category in keyword_mapping.items():
             if keyword in industry:
                 return category
     
-    # 兜底：按股票代码前缀判断
     if stock_code.startswith(('600', '601', '603', '605')):
         return '传统'
     elif stock_code.startswith(('000', '001')):
@@ -87,7 +83,7 @@ def _map_industry_to_category(industry, stock_code):
     elif stock_code.startswith(('300', '301', '002', '688')):
         return '科技'
     else:
-        return '传统'  # 默认
+        return '传统'
 
 
 def get_stock_strategy_config(stock_code):
@@ -101,13 +97,9 @@ def get_stock_strategy_config(stock_code):
     default_strategy = config.get('default_strategy', 'rsi_reversion_v1')
     default_pricing = config.get('default_pricing', {'buy_bias': 0.98, 'stop_loss_pct': 0.05})
 
-    # 查询行业
     industry = _query_stock_industry_baostock(stock_code)
-    
-    # 映射到分类
     category = _map_industry_to_category(industry, stock_code)
     
-    # 获取策略
     strategy = strategy_mapping.get(category, default_strategy)
     pricing = pricing_config.get(category, default_pricing)
     buy_bias = pricing.get('buy_bias', default_pricing.get('buy_bias', 0.98))
@@ -117,8 +109,6 @@ def get_stock_strategy_config(stock_code):
     return strategy, buy_bias, stop_loss_pct
 
 
-# 测试
 if __name__ == "__main__":
-    # 测试歌尔股份
     print(get_stock_strategy_config('002241'))
     print(get_stock_strategy_config('600000'))
