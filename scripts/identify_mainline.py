@@ -1,54 +1,45 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.3 - 替换不稳定ETF为沪市稳定品种
+v6.4 - 复用Baostock登录会话 + 请求延迟，避免限流
 """
 import json
 import sys
+import time
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from logger import log
 
 # ============================================================
-# 配置：ETF赛道分组（替换为稳定沪市ETF）
+# 配置：ETF赛道分组（稳定沪市ETF）
 # ============================================================
 ETF_MAP = {
     # 半导体
     "512480": {"name": "半导体ETF", "group": "半导体", "backup": "512760"},
-    "512760": {"name": "芯片ETF", "group": "半导体", "backup": "512480"},  # 替换159801
-    
+    "512760": {"name": "芯片ETF", "group": "半导体", "backup": "512480"},
     # AI算力
     "588000": {"name": "科创50ETF", "group": "AI算力", "backup": None},
     "515050": {"name": "5GETF", "group": "AI算力", "backup": None},
-    
     # 软件
     "515230": {"name": "信创ETF", "group": "软件", "backup": "512720"},
-    "512720": {"name": "计算机ETF", "group": "软件", "backup": "515230"},  # 替换159852
-    
+    "512720": {"name": "计算机ETF", "group": "软件", "backup": "515230"},
     # 通信
     "515880": {"name": "通信ETF", "group": "通信", "backup": None},
-    
     # 光伏
     "515790": {"name": "光伏ETF", "group": "光伏", "backup": None},
     "516160": {"name": "新能源ETF", "group": "光伏", "backup": None},
-    
     # 新能源车
     "515030": {"name": "新能源车ETF", "group": "新能源车", "backup": None},
-    
     # 消费
     "512690": {"name": "酒ETF", "group": "消费", "backup": None},
-    
     # 医药
     "512010": {"name": "医药ETF", "group": "医药", "backup": None},
-    
     # 有色
     "512400": {"name": "有色ETF", "group": "有色", "backup": None},
-    
     # 金融
     "512800": {"name": "银行ETF", "group": "金融", "backup": None},
     "512880": {"name": "证券ETF", "group": "金融", "backup": None},
-    
     # 红利
     "512890": {"name": "红利低波ETF", "group": "红利", "backup": None},
     "515080": {"name": "中证红利ETF", "group": "红利", "backup": None},
@@ -69,7 +60,7 @@ STRATEGY_MAP = {
 }
 DEFAULT_STRATEGY = "balanced_alpha"
 
-# ETF 状态跟踪
+# ETF 状态跟踪（简化，仍保留）
 ETF_STATUS = {}
 
 
@@ -82,35 +73,8 @@ init_etf_status()
 
 
 # ============================================================
-# 数据源函数（3层备份）
+# 数据源函数（备选：Tushare / AkShare）
 # ============================================================
-def get_etf_data_baostock(code, days=80):
-    try:
-        import baostock as bs
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        lg = bs.login()
-        if lg.error_code != '0':
-            return None
-        # 判断市场：6开头为上海，其他为深圳
-        prefix = "sh" if code.startswith('6') else "sz"
-        rs = bs.query_history_k_data_plus(
-            f"{prefix}.{code}", "date,close",
-            start_date=start_date, end_date=end_date,
-            frequency="d", adjustflag="3"
-        )
-        bs.logout()
-        if rs.error_code != '0':
-            return None
-        data = rs.get_data()
-        if data is None or len(data) < 60:
-            return None
-        return [float(x) for x in data['close'].tolist()]
-    except Exception as e:
-        log("WARNING", f"[Baostock] 获取 {code} 失败: {e}")
-        return None
-
-
 def get_etf_data_tushare(code, days=80):
     try:
         import tushare as ts
@@ -121,7 +85,6 @@ def get_etf_data_tushare(code, days=80):
         pro = ts.pro_api(token)
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y%m%d")
-        # Tushare 代码格式：xxx.SH 或 xxx.SZ
         suffix = "SH" if code.startswith('6') else "SZ"
         df = pro.fund_daily(ts_code=f"{code}.{suffix}", start_date=start_date, end_date=end_date)
         if df is None or len(df) < 60:
@@ -147,47 +110,10 @@ def get_etf_data_akshare(code, days=80):
         return None
 
 
-def get_etf_data_with_fallback(code, days=80):
-    log("DEBUG", f"获取ETF {code} 数据...")
-    # 尝试主ETF
-    closes = get_etf_data_baostock(code, days)
-    if closes:
-        log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
-        ETF_STATUS[code]["fail_count"] = 0
-        ETF_STATUS[code]["status"] = "active"
-        return closes
-
-    ETF_STATUS[code]["fail_count"] += 1
-    log("WARNING", f"  主ETF {code} 失败 (连续失败 {ETF_STATUS[code]['fail_count']} 次)")
-
-    # 连续失败 >= 3 次时尝试备选
-    if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
-        backup_code = ETF_MAP[code]["backup"]
-        log("INFO", f"  切换到备选ETF {backup_code}")
-        ETF_STATUS[code]["status"] = "degraded"
-        ETF_STATUS[code]["last_switch"] = datetime.now().strftime("%Y-%m-%d")
-        closes = get_etf_data_baostock(backup_code, days)
-        if closes:
-            log("INFO", f"  ✅ 备选 {backup_code} 成功: {len(closes)}个交易日")
-            return closes
-        # 备选也失败，继续尝试其他数据源
-    log("WARNING", f"  Baostock失败，切换Tushare")
-    closes = get_etf_data_tushare(code, days)
-    if closes:
-        log("INFO", f"  ✅ Tushare成功: {len(closes)}个交易日")
-        ETF_STATUS[code]["fail_count"] = 0
-        return closes
-    log("WARNING", f"  Tushare失败，切换AkShare")
-    closes = get_etf_data_akshare(code, days)
-    if closes:
-        log("INFO", f"  ✅ AkShare成功: {len(closes)}个交易日")
-        ETF_STATUS[code]["fail_count"] = 0
-        return closes
-    log("ERROR", f"  所有数据源均失败: {code}")
-    return None
-
-
 def get_benchmark_data(days=80):
+    """
+    获取沪深300基准数据（独立登录，因为基准只需要一次）
+    """
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -210,6 +136,85 @@ def get_benchmark_data(days=80):
     except Exception as e:
         log("WARNING", f"[get_benchmark_data] 获取基准失败: {e}")
         return None
+
+
+def _fetch_etf_from_baostock_with_session(code, days, bs_session):
+    """
+    使用已存在的 bs 会话获取ETF数据，避免重复登录
+    """
+    try:
+        prefix = "sh" if code.startswith('6') else "sz"
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
+        rs = bs_session.query_history_k_data_plus(
+            f"{prefix}.{code}", "date,close",
+            start_date=start_date, end_date=end_date,
+            frequency="d", adjustflag="3"
+        )
+        if rs.error_code != '0':
+            return None
+        data = rs.get_data()
+        if data is None or len(data) < 60:
+            return None
+        return [float(x) for x in data['close'].tolist()]
+    except Exception as e:
+        log("WARNING", f"[Baostock会话] 获取 {code} 失败: {e}")
+        return None
+
+
+def get_etf_data_with_fallback(code, days, bs_session=None):
+    """
+    获取ETF数据：优先使用Baostock会话，失败则尝试Tushare/AkShare
+    """
+    # 1. 使用已有的Baostock会话
+    if bs_session is not None:
+        closes = _fetch_etf_from_baostock_with_session(code, days, bs_session)
+        if closes:
+            log("DEBUG", f"  ✅ Baostock会话成功: {code}")
+            ETF_STATUS[code]["fail_count"] = 0
+            ETF_STATUS[code]["status"] = "active"
+            return closes
+        else:
+            ETF_STATUS[code]["fail_count"] += 1
+            log("WARNING", f"  Baostock会话获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
+    else:
+        # 如果没有会话，尝试旧方式（保留兼容）
+        log("WARNING", f"  无Baostock会话，跳过主源")
+
+    # 2. 尝试备选数据源
+    # 连续失败 >= 3 次时尝试备选ETF（如果有）
+    if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
+        backup_code = ETF_MAP[code]["backup"]
+        log("INFO", f"  切换到备选ETF {backup_code}")
+        ETF_STATUS[code]["status"] = "degraded"
+        ETF_STATUS[code]["last_switch"] = datetime.now().strftime("%Y-%m-%d")
+        # 尝试用Tushare/AkShare获取备选
+        closes = get_etf_data_tushare(backup_code, days)
+        if not closes:
+            closes = get_etf_data_akshare(backup_code, days)
+        if closes:
+            log("INFO", f"  ✅ 备选 {backup_code} 成功")
+            ETF_STATUS[code]["fail_count"] = 0
+            return closes
+
+    # 3. 尝试Tushare
+    log("WARNING", f"  尝试Tushare: {code}")
+    closes = get_etf_data_tushare(code, days)
+    if closes:
+        log("INFO", f"  ✅ Tushare成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
+        return closes
+
+    # 4. 尝试AkShare
+    log("WARNING", f"  尝试AkShare: {code}")
+    closes = get_etf_data_akshare(code, days)
+    if closes:
+        log("INFO", f"  ✅ AkShare成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
+        return closes
+
+    log("ERROR", f"  所有数据源均失败: {code}")
+    return None
 
 
 # ============================================================
@@ -241,13 +246,26 @@ def identify_mainline():
             "ranking": 0
         }
 
+    # 登录Baostock（仅一次）
+    import baostock as bs
+    log("INFO", "登录Baostock获取ETF数据...")
+    lg = bs.login()
+    if lg.error_code != '0':
+        log("WARNING", f"Baostock登录失败: {lg.error_msg}，将仅使用Tushare/AkShare")
+        bs_session = None
+    else:
+        bs_session = lg
+
     scores = []
     for code, info in ETF_MAP.items():
         if ETF_STATUS.get(code, {}).get("status") == "disabled":
             continue
-        etf = get_etf_data_with_fallback(code)
+        
+        # 获取ETF数据（传入会话）
+        etf = get_etf_data_with_fallback(code, 80, bs_session)
         if not etf:
             continue
+        
         rs_5, rs_20, rs_60 = calculate_relative_strength(etf, benchmark)
         combined = rs_5*0.3 + rs_20*0.5 + rs_60*0.2
         scores.append({
@@ -256,6 +274,14 @@ def identify_mainline():
             "group": info["group"],
             "combined": combined
         })
+        
+        # 增加延迟，降低请求频率
+        time.sleep(0.3)
+
+    # 登出Baostock
+    if bs_session is not None:
+        bs.logout()
+        log("INFO", "Baostock登出")
 
     if not scores:
         log("WARNING", "无ETF数据，使用默认策略")
@@ -309,7 +335,6 @@ def identify_mainline():
                     confirm_days = 3
                     break
 
-    # 第三档：无主线
     if not main_group:
         log("INFO", "无明确主线，使用默认策略")
         return {
