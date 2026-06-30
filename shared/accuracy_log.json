@@ -1,0 +1,2 @@
+mkdir -p shared
+echo "[]" > shared/accuracy_log.json

@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-用ETF持仓重合度自动分组，识别当前市场最强主线子赛道
-v6.1 - 增强异常处理和日志
+v6.3 - 增加红利ETF、主线去重、ETF备选状态管理
 """
 import json
 import sys
@@ -12,25 +11,27 @@ from datetime import datetime, timedelta
 from logger import log
 
 # ============================================================
-# 配置：ETF赛道分组
+# 配置：ETF赛道分组（含红利ETF，增加备选机制）
 # ============================================================
 ETF_MAP = {
-    "512480": {"name": "半导体ETF", "group": "半导体"},
-    "159995": {"name": "芯片ETF", "group": "半导体"},
-    "588000": {"name": "科创50ETF", "group": "AI算力"},
-    "515050": {"name": "5GETF", "group": "AI算力"},
-    "159852": {"name": "软件ETF", "group": "软件"},
-    "515230": {"name": "信创ETF", "group": "软件"},
-    "515880": {"name": "通信ETF", "group": "通信"},
-    "159732": {"name": "消费电子ETF", "group": "消费电子"},
-    "515790": {"name": "光伏ETF", "group": "光伏"},
-    "516160": {"name": "新能源ETF", "group": "光伏"},
-    "515030": {"name": "新能源车ETF", "group": "新能源车"},
-    "512690": {"name": "酒ETF", "group": "消费"},
-    "512010": {"name": "医药ETF", "group": "医药"},
-    "512400": {"name": "有色ETF", "group": "有色"},
-    "512800": {"name": "银行ETF", "group": "金融"},
-    "512880": {"name": "证券ETF", "group": "金融"},
+    "512480": {"name": "半导体ETF", "group": "半导体", "backup": "159801"},
+    "159801": {"name": "芯片ETF龙头", "group": "半导体", "backup": "512480"},
+    "588000": {"name": "科创50ETF", "group": "AI算力", "backup": None},
+    "515050": {"name": "5GETF", "group": "AI算力", "backup": None},
+    "515230": {"name": "信创ETF", "group": "软件", "backup": "159852"},
+    "159852": {"name": "软件ETF", "group": "软件", "backup": "515230"},
+    "515880": {"name": "通信ETF", "group": "通信", "backup": None},
+    "159993": {"name": "电子ETF", "group": "消费电子", "backup": None},
+    "515790": {"name": "光伏ETF", "group": "光伏", "backup": None},
+    "516160": {"name": "新能源ETF", "group": "光伏", "backup": None},
+    "515030": {"name": "新能源车ETF", "group": "新能源车", "backup": None},
+    "512690": {"name": "酒ETF", "group": "消费", "backup": None},
+    "512010": {"name": "医药ETF", "group": "医药", "backup": None},
+    "512400": {"name": "有色ETF", "group": "有色", "backup": None},
+    "512800": {"name": "银行ETF", "group": "金融", "backup": None},
+    "512880": {"name": "证券ETF", "group": "金融", "backup": None},
+    "512890": {"name": "红利低波ETF", "group": "红利", "backup": None},
+    "515080": {"name": "中证红利ETF", "group": "红利", "backup": None},
 }
 
 STRATEGY_MAP = {
@@ -43,10 +44,23 @@ STRATEGY_MAP = {
     "新能源车": "momentum_quality",
     "消费": "quality_value",
     "医药": "quality_value",
+    "红利": "quality_value",
     "有色": "dual_low",
     "金融": "balanced_alpha",
 }
 DEFAULT_STRATEGY = "balanced_alpha"
+
+# ETF 状态跟踪
+ETF_STATUS = {}  # {code: {"fail_count": 0, "status": "active", "last_switch": None}}
+
+
+def init_etf_status():
+    for code in ETF_MAP:
+        ETF_STATUS[code] = {"fail_count": 0, "status": "active", "last_switch": None}
+
+
+init_etf_status()
+
 
 # ============================================================
 # 数据源函数（3层备份）
@@ -72,8 +86,9 @@ def get_etf_data_baostock(code, days=80):
             return None
         return [float(x) for x in data['close'].tolist()]
     except Exception as e:
-        log("WARNING", f"[get_etf_data_baostock] 获取 {code} 失败: {e}")
+        log("WARNING", f"[Baostock] 获取 {code} 失败: {e}")
         return None
+
 
 def get_etf_data_tushare(code, days=80):
     try:
@@ -91,8 +106,9 @@ def get_etf_data_tushare(code, days=80):
         df = df.sort_values('trade_date')
         return df['close'].values.tolist()
     except Exception as e:
-        log("WARNING", f"[get_etf_data_tushare] 获取 {code} 失败: {e}")
+        log("WARNING", f"[Tushare] 获取 {code} 失败: {e}")
         return None
+
 
 def get_etf_data_akshare(code, days=80):
     try:
@@ -104,27 +120,56 @@ def get_etf_data_akshare(code, days=80):
             return None
         return df['收盘'].values.tolist()
     except Exception as e:
-        log("WARNING", f"[get_etf_data_akshare] 获取 {code} 失败: {e}")
+        log("WARNING", f"[AkShare] 获取 {code} 失败: {e}")
         return None
 
-def get_etf_data(code, days=80):
-    log("INFO", f"获取ETF {code} 数据...")
+
+def get_etf_data_with_fallback(code, days=80):
+    """
+    获取ETF数据，支持备选切换和状态跟踪
+    """
+    log("DEBUG", f"获取ETF {code} 数据...")
+    # 尝试主ETF
     closes = get_etf_data_baostock(code, days)
     if closes:
         log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
+        # 重置失败计数
+        ETF_STATUS[code]["fail_count"] = 0
+        ETF_STATUS[code]["status"] = "active"
         return closes
+
+    # 如果主ETF失败，增加失败计数
+    ETF_STATUS[code]["fail_count"] += 1
+    log("WARNING", f"  主ETF {code} 失败 (连续失败 {ETF_STATUS[code]['fail_count']} 次)")
+
+    # 如果连续失败 >= 3 次，尝试备选
+    if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
+        backup_code = ETF_MAP[code]["backup"]
+        log("INFO", f"  切换到备选ETF {backup_code}")
+        ETF_STATUS[code]["status"] = "degraded"
+        ETF_STATUS[code]["last_switch"] = datetime.now().strftime("%Y-%m-%d")
+        # 尝试备选
+        closes = get_etf_data_baostock(backup_code, days)
+        if closes:
+            log("INFO", f"  ✅ 备选 {backup_code} 成功: {len(closes)}个交易日")
+            return closes
+        # 备选也失败，继续尝试其他数据源（但主ETF已失败，直接返回None）
+    # 如果无备选或备选失败，尝试Tushare/AkShare
     log("WARNING", f"  Baostock失败，切换Tushare")
     closes = get_etf_data_tushare(code, days)
     if closes:
         log("INFO", f"  ✅ Tushare成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
         return closes
     log("WARNING", f"  Tushare失败，切换AkShare")
     closes = get_etf_data_akshare(code, days)
     if closes:
         log("INFO", f"  ✅ AkShare成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
         return closes
     log("ERROR", f"  所有数据源均失败: {code}")
     return None
+
 
 def get_benchmark_data(days=80):
     try:
@@ -150,6 +195,7 @@ def get_benchmark_data(days=80):
         log("WARNING", f"[get_benchmark_data] 获取基准失败: {e}")
         return None
 
+
 # ============================================================
 # 核心计算
 # ============================================================
@@ -164,14 +210,30 @@ def calculate_relative_strength(etf_closes, benchmark_closes):
     bench_60 = (benchmark_closes[-1]/benchmark_closes[-61]-1)*100 if len(benchmark_closes)>60 else 0
     return etf_5-bench_5, etf_20-bench_20, etf_60-bench_60
 
+
 def identify_mainline():
+    """
+    返回结构化主线信息，增加主线去重逻辑
+    """
     benchmark = get_benchmark_data()
     if not benchmark:
         log("WARNING", "无法获取基准，使用默认策略")
-        return None, DEFAULT_STRATEGY, 0, 0
+        return {
+            "main_group": None,
+            "strategy": DEFAULT_STRATEGY,
+            "confidence": 0,
+            "confirm_days": 0,
+            "relative_strength": 0,
+            "etf_count": 0,
+            "ranking": 0
+        }
+
     scores = []
     for code, info in ETF_MAP.items():
-        etf = get_etf_data(code)
+        # 检查状态，如果已禁用则跳过
+        if ETF_STATUS.get(code, {}).get("status") == "disabled":
+            continue
+        etf = get_etf_data_with_fallback(code)
         if not etf:
             continue
         rs_5, rs_20, rs_60 = calculate_relative_strength(etf, benchmark)
@@ -182,44 +244,111 @@ def identify_mainline():
             "group": info["group"],
             "combined": combined
         })
+
     if not scores:
         log("WARNING", "无ETF数据，使用默认策略")
-        return None, DEFAULT_STRATEGY, 0, 0
+        return {
+            "main_group": None,
+            "strategy": DEFAULT_STRATEGY,
+            "confidence": 0,
+            "confirm_days": 0,
+            "relative_strength": 0,
+            "etf_count": 0,
+            "ranking": 0
+        }
+
     scores = sorted(scores, key=lambda x: x["combined"], reverse=True)
     top = scores[0]
+
+    # 统计分组
     top_groups = [s["group"] for s in scores[:5]]
     group_counts = {}
     for g in top_groups:
         group_counts[g] = group_counts.get(g, 0) + 1
+
+    # 三档主线判定
     main_group = None
+    confidence = 0
+    confirm_days = 0
+    main_strength = 0
+    etf_count = 0
+    ranking = 0
+
+    # 第一档：≥3只同组
     for group, count in group_counts.items():
         if count >= 3:
             main_group = group
+            confidence = 80
+            group_scores = [s["combined"] for s in scores if s["group"] == group]
+            main_strength = sum(group_scores)/len(group_scores) if group_scores else 0
+            etf_count = len(group_scores)
+            confirm_days = 2 if main_strength > 7 else 3
             break
-    if main_group:
-        group_scores = [s["combined"] for s in scores if s["group"] == main_group]
-        avg_strength = sum(group_scores)/len(group_scores) if group_scores else 0
-        if avg_strength > 7:
-            confirm_days = 2
-        elif avg_strength > 3:
-            confirm_days = 3
-        else:
-            confirm_days = 5
-        strategy = STRATEGY_MAP.get(main_group, DEFAULT_STRATEGY)
-        confidence = min(100, 50 + avg_strength*5)
-        log("INFO", f"当前主线: {main_group}, 强度: {avg_strength:.2f}%, 置信度: {confidence:.0f}%, 策略: {strategy}")
-        return main_group, strategy, confidence, confirm_days
-    log("INFO", "无明确主线，使用默认策略")
-    return None, DEFAULT_STRATEGY, 0, 0
+
+    # 第二档：2只同组 + 强度>5%
+    if not main_group:
+        for group, count in group_counts.items():
+            if count >= 2:
+                group_scores = [s["combined"] for s in scores if s["group"] == group]
+                avg_strength = sum(group_scores)/len(group_scores) if group_scores else 0
+                if avg_strength > 5:
+                    main_group = group
+                    confidence = 60
+                    main_strength = avg_strength
+                    etf_count = len(group_scores)
+                    confirm_days = 3
+                    break
+
+    # 第三档：无主线
+    if not main_group:
+        log("INFO", "无明确主线，使用默认策略")
+        return {
+            "main_group": None,
+            "strategy": DEFAULT_STRATEGY,
+            "confidence": 0,
+            "confirm_days": 0,
+            "relative_strength": 0,
+            "etf_count": 0,
+            "ranking": 0
+        }
+
+    # 主线去重：如果多个主线映射到同一策略，只保留置信度最高的
+    strategy = STRATEGY_MAP.get(main_group, DEFAULT_STRATEGY)
+    # 找出所有映射到同一策略的分组，取置信度最高者
+    same_strategy_groups = [g for g, s in STRATEGY_MAP.items() if s == strategy and g in group_counts]
+    if len(same_strategy_groups) > 1:
+        # 计算各组的平均强度
+        group_avg = {}
+        for g in same_strategy_groups:
+            gs = [s["combined"] for s in scores if s["group"] == g]
+            group_avg[g] = sum(gs)/len(gs) if gs else 0
+        # 选强度最高的作为主线
+        main_group = max(group_avg, key=group_avg.get)
+        main_strength = group_avg[main_group]
+        log("INFO", f"主线去重: {same_strategy_groups} → 选择 {main_group} (强度 {main_strength:.2f}%)")
+
+    # 计算排名
+    group_avg_all = {}
+    for group in group_counts.keys():
+        gs = [s["combined"] for s in scores if s["group"] == group]
+        group_avg_all[group] = sum(gs)/len(gs) if gs else 0
+    sorted_groups = sorted(group_avg_all.items(), key=lambda x: x[1], reverse=True)
+    ranking = [g[0] for g in sorted_groups].index(main_group) + 1
+
+    log("INFO", f"当前主线: {main_group}, 强度: {main_strength:.2f}%, 置信度: {confidence}%, 策略: {strategy}")
+    return {
+        "main_group": main_group,
+        "strategy": strategy,
+        "confidence": confidence,
+        "confirm_days": confirm_days,
+        "relative_strength": main_strength,
+        "etf_count": etf_count,
+        "ranking": ranking
+    }
+
 
 if __name__ == "__main__":
-    group, strategy, confidence, days = identify_mainline()
+    result = identify_mainline()
     with open("mainline_result.json", "w") as f:
-        json.dump({
-            "group": group,
-            "strategy": strategy,
-            "confidence": confidence,
-            "confirm_days": days,
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        }, f, indent=2)
-    log("INFO", "主线识别结果已保存到 mainline_result.json")
+        json.dump(result, f, indent=2)
+    log("INFO", f"主线识别结果已保存到 mainline_result.json")

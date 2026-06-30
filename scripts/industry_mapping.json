@@ -1,18 +1,43 @@
 {
-  "_description": "行业关键词映射和定价参数（Baostock 动态获取行业分类）",
+  "_description": "行业策略映射和定价参数（通用化主线适配 + 差异化盈亏比）",
   "_last_updated": "2026-07-01",
   "strategy_mapping": {
-    "科技": "trend_pullback_rebound",
-    "传统": "rsi_reversion_v1",
-    "金融": "rsi_reversion_v1"
+    "半导体": "momentum_quality",
+    "AI算力": "momentum_quality",
+    "软件": "momentum_quality",
+    "通信": "momentum_quality",
+    "消费电子": "momentum_quality",
+    "光伏": "momentum_quality",
+    "新能源车": "momentum_quality",
+    "消费": "quality_value",
+    "医药": "quality_value",
+    "红利": "quality_value",
+    "有色": "dual_low",
+    "金融": "balanced_alpha"
   },
-  "default_strategy": "rsi_reversion_v1",
+  "default_strategy": "balanced_alpha",
   "pricing_config": {
-    "科技": { "buy_bias": 1.02, "stop_loss_pct": 0.07 },
-    "传统": { "buy_bias": 0.98, "stop_loss_pct": 0.05 },
-    "金融": { "buy_bias": 0.98, "stop_loss_pct": 0.05 }
+    "科技": {
+      "buy_bias": 1.02,
+      "stop_loss_pct": 0.07,
+      "take_profit_rr": 2.5
+    },
+    "传统": {
+      "buy_bias": 0.98,
+      "stop_loss_pct": 0.05,
+      "take_profit_rr": 2.0
+    },
+    "金融": {
+      "buy_bias": 0.98,
+      "stop_loss_pct": 0.05,
+      "take_profit_rr": 1.5
+    }
   },
-  "default_pricing": { "buy_bias": 0.98, "stop_loss_pct": 0.05 },
+  "default_pricing": {
+    "buy_bias": 0.98,
+    "stop_loss_pct": 0.05,
+    "take_profit_rr": 2.0
+  },
   "industry_keyword_mapping": {
     "计算机": "科技",
     "通信": "科技",
