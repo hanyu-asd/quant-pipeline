@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.3 - 增加红利ETF、主线去重、ETF备选状态管理
+v6.3 - 替换不稳定ETF为沪市稳定品种
 """
 import json
 import sys
@@ -11,25 +11,45 @@ from datetime import datetime, timedelta
 from logger import log
 
 # ============================================================
-# 配置：ETF赛道分组（含红利ETF，增加备选机制）
+# 配置：ETF赛道分组（替换为稳定沪市ETF）
 # ============================================================
 ETF_MAP = {
-    "512480": {"name": "半导体ETF", "group": "半导体", "backup": "159801"},
-    "159801": {"name": "芯片ETF龙头", "group": "半导体", "backup": "512480"},
+    # 半导体
+    "512480": {"name": "半导体ETF", "group": "半导体", "backup": "512760"},
+    "512760": {"name": "芯片ETF", "group": "半导体", "backup": "512480"},  # 替换159801
+    
+    # AI算力
     "588000": {"name": "科创50ETF", "group": "AI算力", "backup": None},
     "515050": {"name": "5GETF", "group": "AI算力", "backup": None},
-    "515230": {"name": "信创ETF", "group": "软件", "backup": "159852"},
-    "159852": {"name": "软件ETF", "group": "软件", "backup": "515230"},
+    
+    # 软件
+    "515230": {"name": "信创ETF", "group": "软件", "backup": "512720"},
+    "512720": {"name": "计算机ETF", "group": "软件", "backup": "515230"},  # 替换159852
+    
+    # 通信
     "515880": {"name": "通信ETF", "group": "通信", "backup": None},
-    "159993": {"name": "电子ETF", "group": "消费电子", "backup": None},
+    
+    # 光伏
     "515790": {"name": "光伏ETF", "group": "光伏", "backup": None},
     "516160": {"name": "新能源ETF", "group": "光伏", "backup": None},
+    
+    # 新能源车
     "515030": {"name": "新能源车ETF", "group": "新能源车", "backup": None},
+    
+    # 消费
     "512690": {"name": "酒ETF", "group": "消费", "backup": None},
+    
+    # 医药
     "512010": {"name": "医药ETF", "group": "医药", "backup": None},
+    
+    # 有色
     "512400": {"name": "有色ETF", "group": "有色", "backup": None},
+    
+    # 金融
     "512800": {"name": "银行ETF", "group": "金融", "backup": None},
     "512880": {"name": "证券ETF", "group": "金融", "backup": None},
+    
+    # 红利
     "512890": {"name": "红利低波ETF", "group": "红利", "backup": None},
     "515080": {"name": "中证红利ETF", "group": "红利", "backup": None},
 }
@@ -39,7 +59,6 @@ STRATEGY_MAP = {
     "AI算力": "momentum_quality",
     "软件": "momentum_quality",
     "通信": "momentum_quality",
-    "消费电子": "momentum_quality",
     "光伏": "momentum_quality",
     "新能源车": "momentum_quality",
     "消费": "quality_value",
@@ -51,7 +70,7 @@ STRATEGY_MAP = {
 DEFAULT_STRATEGY = "balanced_alpha"
 
 # ETF 状态跟踪
-ETF_STATUS = {}  # {code: {"fail_count": 0, "status": "active", "last_switch": None}}
+ETF_STATUS = {}
 
 
 def init_etf_status():
@@ -73,8 +92,10 @@ def get_etf_data_baostock(code, days=80):
         lg = bs.login()
         if lg.error_code != '0':
             return None
+        # 判断市场：6开头为上海，其他为深圳
+        prefix = "sh" if code.startswith('6') else "sz"
         rs = bs.query_history_k_data_plus(
-            f"sh.{code}", "date,close",
+            f"{prefix}.{code}", "date,close",
             start_date=start_date, end_date=end_date,
             frequency="d", adjustflag="3"
         )
@@ -100,7 +121,9 @@ def get_etf_data_tushare(code, days=80):
         pro = ts.pro_api(token)
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y%m%d")
-        df = pro.fund_daily(ts_code=f"{code}.SH", start_date=start_date, end_date=end_date)
+        # Tushare 代码格式：xxx.SH 或 xxx.SZ
+        suffix = "SH" if code.startswith('6') else "SZ"
+        df = pro.fund_daily(ts_code=f"{code}.{suffix}", start_date=start_date, end_date=end_date)
         if df is None or len(df) < 60:
             return None
         df = df.sort_values('trade_date')
@@ -125,36 +148,29 @@ def get_etf_data_akshare(code, days=80):
 
 
 def get_etf_data_with_fallback(code, days=80):
-    """
-    获取ETF数据，支持备选切换和状态跟踪
-    """
     log("DEBUG", f"获取ETF {code} 数据...")
     # 尝试主ETF
     closes = get_etf_data_baostock(code, days)
     if closes:
         log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
-        # 重置失败计数
         ETF_STATUS[code]["fail_count"] = 0
         ETF_STATUS[code]["status"] = "active"
         return closes
 
-    # 如果主ETF失败，增加失败计数
     ETF_STATUS[code]["fail_count"] += 1
     log("WARNING", f"  主ETF {code} 失败 (连续失败 {ETF_STATUS[code]['fail_count']} 次)")
 
-    # 如果连续失败 >= 3 次，尝试备选
+    # 连续失败 >= 3 次时尝试备选
     if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
         backup_code = ETF_MAP[code]["backup"]
         log("INFO", f"  切换到备选ETF {backup_code}")
         ETF_STATUS[code]["status"] = "degraded"
         ETF_STATUS[code]["last_switch"] = datetime.now().strftime("%Y-%m-%d")
-        # 尝试备选
         closes = get_etf_data_baostock(backup_code, days)
         if closes:
             log("INFO", f"  ✅ 备选 {backup_code} 成功: {len(closes)}个交易日")
             return closes
-        # 备选也失败，继续尝试其他数据源（但主ETF已失败，直接返回None）
-    # 如果无备选或备选失败，尝试Tushare/AkShare
+        # 备选也失败，继续尝试其他数据源
     log("WARNING", f"  Baostock失败，切换Tushare")
     closes = get_etf_data_tushare(code, days)
     if closes:
@@ -212,9 +228,6 @@ def calculate_relative_strength(etf_closes, benchmark_closes):
 
 
 def identify_mainline():
-    """
-    返回结构化主线信息，增加主线去重逻辑
-    """
     benchmark = get_benchmark_data()
     if not benchmark:
         log("WARNING", "无法获取基准，使用默认策略")
@@ -230,7 +243,6 @@ def identify_mainline():
 
     scores = []
     for code, info in ETF_MAP.items():
-        # 检查状态，如果已禁用则跳过
         if ETF_STATUS.get(code, {}).get("status") == "disabled":
             continue
         etf = get_etf_data_with_fallback(code)
@@ -260,13 +272,11 @@ def identify_mainline():
     scores = sorted(scores, key=lambda x: x["combined"], reverse=True)
     top = scores[0]
 
-    # 统计分组
     top_groups = [s["group"] for s in scores[:5]]
     group_counts = {}
     for g in top_groups:
         group_counts[g] = group_counts.get(g, 0) + 1
 
-    # 三档主线判定
     main_group = None
     confidence = 0
     confirm_days = 0
@@ -312,17 +322,14 @@ def identify_mainline():
             "ranking": 0
         }
 
-    # 主线去重：如果多个主线映射到同一策略，只保留置信度最高的
+    # 主线去重
     strategy = STRATEGY_MAP.get(main_group, DEFAULT_STRATEGY)
-    # 找出所有映射到同一策略的分组，取置信度最高者
     same_strategy_groups = [g for g, s in STRATEGY_MAP.items() if s == strategy and g in group_counts]
     if len(same_strategy_groups) > 1:
-        # 计算各组的平均强度
         group_avg = {}
         for g in same_strategy_groups:
             gs = [s["combined"] for s in scores if s["group"] == g]
             group_avg[g] = sum(gs)/len(gs) if gs else 0
-        # 选强度最高的作为主线
         main_group = max(group_avg, key=group_avg.get)
         main_strength = group_avg[main_group]
         log("INFO", f"主线去重: {same_strategy_groups} → 选择 {main_group} (强度 {main_strength:.2f}%)")
@@ -351,4 +358,4 @@ if __name__ == "__main__":
     result = identify_mainline()
     with open("mainline_result.json", "w") as f:
         json.dump(result, f, indent=2)
-    log("INFO", f"主线识别结果已保存到 mainline_result.json")
+    log("INFO", "主线识别结果已保存到 mainline_result.json")
