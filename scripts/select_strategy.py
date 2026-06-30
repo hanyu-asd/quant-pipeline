@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.8 - 修正 TickFlow API，移除易方达 AI
+v6.9 - 优先使用 TickFlow 获取指数数据
 """
 import requests
 import json
@@ -57,8 +57,32 @@ def is_cache_valid(cache_date):
 
 
 # ============================================================
-# 指数数据获取（多源）
+# 指数数据获取（TickFlow 优先）
 # ============================================================
+def get_index_history_tickflow(symbol, days=100):
+    """使用 TickFlow 获取指数日线数据"""
+    try:
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        # 转换符号格式，例如 sh000001 -> 000001.SH
+        code = symbol.replace('sh', '').replace('sz', '')
+        market = 'SH' if 'sh' in symbol else 'SZ'
+        full_symbol = f"{code}.{market}"
+        df = tf.klines.get(
+            symbol=full_symbol,
+            period="1d",
+            count=days,
+            as_dataframe=True
+        )
+        if df is not None and len(df) >= 10:
+            df = df.sort_values('trade_date')
+            return df['close'].values.tolist()
+        return None
+    except Exception as e:
+        log("WARNING", f"[TickFlow] 获取指数 {symbol} 失败: {e}")
+        return None
+
+
 def get_index_history_baostock(symbol, days=100):
     try:
         import baostock as bs
@@ -81,30 +105,6 @@ def get_index_history_baostock(symbol, days=100):
         return [float(x) for x in data['close'].tolist()]
     except Exception as e:
         log("WARNING", f"[Baostock] 获取指数失败: {e}")
-        return None
-
-
-def get_index_history_tickflow(symbol, days=100):
-    """使用 TickFlow 获取指数日线数据（正确 API）"""
-    try:
-        from tickflow import TickFlow
-        tf = TickFlow.free()
-        # 转换 symbol: sh000001 → 000001.SH
-        code = symbol.replace('sh', '').replace('sz', '')
-        market = 'SH' if 'sh' in symbol else 'SZ'
-        full_symbol = f"{code}.{market}"
-        df = tf.klines.get(
-            symbol=full_symbol,
-            period="1d",
-            count=days,
-            as_dataframe=True
-        )
-        if df is not None and len(df) >= 10:
-            df = df.sort_values('trade_date')
-            return df['close'].values.tolist()
-        return None
-    except Exception as e:
-        log("WARNING", f"[TickFlow] 获取指数 {symbol} 失败: {e}")
         return None
 
 
@@ -172,21 +172,21 @@ def get_index_data(symbol, days=100):
 
     log("INFO", f"正在获取 {name} 数据...")
 
-    # 1. Baostock
-    closes = get_index_history_baostock(symbol, days)
-    if closes:
-        log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
-        return closes
-
-    # 2. TickFlow
-    log("WARNING", f"  Baostock失败，切换TickFlow")
+    # 1. TickFlow（首选）
     closes = get_index_history_tickflow(symbol, days)
     if closes:
         log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")
         return closes
 
+    # 2. Baostock
+    log("WARNING", f"  TickFlow失败，尝试Baostock")
+    closes = get_index_history_baostock(symbol, days)
+    if closes:
+        log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
+        return closes
+
     # 3. 新浪
-    log("WARNING", f"  TickFlow失败，切换新浪财经")
+    log("WARNING", f"  Baostock失败，切换新浪财经")
     closes = get_index_history_sina(symbol, days)
     if closes:
         log("INFO", f"  ✅ 新浪财经成功: {len(closes)}个交易日")
@@ -314,10 +314,10 @@ def generate_default_market_state():
 
 def main():
     log("INFO", "=" * 70)
-    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.8）")
+    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.9）")
     log("INFO", "=" * 70)
 
-    # 获取上证指数数据（优先实时，缓存仅作兜底）
+    # 获取上证指数数据
     sh_closes = get_index_data("sh000001", 100)
     sh_cache_date, sh_cache_closes = load_index_cache("sh000001")
     use_realtime = sh_closes is not None
@@ -352,7 +352,7 @@ def main():
             log("INFO", "默认市场状态和策略上下文已保存")
             return
 
-    # 获取创业板指数据（若无则用上证替代）
+    # 获取创业板指数据
     cy_closes = get_index_data("sz399006", 100)
     if cy_closes:
         log("INFO", f"✅ 创业板指数据获取成功，交易日数: {len(cy_closes)}")
@@ -361,7 +361,7 @@ def main():
         log("WARNING", "创业板指数据获取失败，将使用上证指数替代")
         cy_closes = sh_closes
 
-    # 如果数据来自缓存，强制使用默认防守策略（不计算趋势）
+    # 如果数据来自缓存，强制使用默认防守策略
     if not use_realtime:
         log("WARNING", "⚠️ 数据来源为缓存，不进行趋势判断，采用默认防守策略")
         default_state = generate_default_market_state()
