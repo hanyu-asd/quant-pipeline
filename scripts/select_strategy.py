@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.1 - 增强异常处理、告警、日志统一
+v6.3 - 适配 identify_mainline 结构化返回值
 """
 import requests
 import json
@@ -126,63 +126,21 @@ def calculate_ma(closes, period):
         return closes[-1]
     return sum(closes[-period:]) / period
 
-def detect_trend(sh_closes, cy_closes):
+def detect_trend_and_state(sh_closes, cy_closes, mainline_result):
     if not sh_closes or len(sh_closes) < 60:
-        return "sideways", "rsi_reversion_v1", "数据不足", "数据不足", 0, 0, 3
+        return "震荡", "normal", "震荡", 0, 0, 0, 0, 0
+    
     ma20 = calculate_ma(sh_closes, 20)
     ma60 = calculate_ma(sh_closes, 60)
     current = sh_closes[-1]
     momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100 if len(sh_closes)>=20 else 0
-    long_trend = "up" if ma20 > ma60 else ("down" if ma20 < ma60 else "sideways")
-    if long_trend == "up" and momentum_20 < -3:
-        base_trend = "sideways"
-    elif long_trend == "down" and momentum_20 > 3:
-        base_trend = "sideways"
-    elif long_trend == "up":
-        base_trend = "up"
-    elif long_trend == "down":
-        base_trend = "down"
+    
+    if ma20 > ma60:
+        trend = "上升趋势"
+    elif ma20 < ma60:
+        trend = "下降趋势"
     else:
-        base_trend = "sideways"
-    tech_premium = 0
-    if cy_closes and len(cy_closes)>=20 and len(sh_closes)>=20:
-        ret_cy = (cy_closes[-1]/cy_closes[-20]-1)*100
-        ret_sh = (sh_closes[-1]/sh_closes[-20]-1)*100
-        tech_premium = round(ret_cy - ret_sh, 2)
-    return base_trend, tech_premium, ma20, ma60, momentum_20, current
-
-def get_position_advice(trend, market_state, confidence):
-    if market_state == "extreme":
-        return 0, 0, 100, "极端模式，建议空仓观望"
-    if market_state == "high_risk":
-        return 30, 30, 40, "高风险模式，建议轻仓防守"
-    if trend == "up" and confidence > 70:
-        return 70, 20, 10, "上升趋势+主线明确，积极配置"
-    if trend == "up" and confidence > 50:
-        return 50, 30, 20, "上升趋势+主线模糊，适度配置"
-    if trend == "up":
-        return 40, 35, 25, "上升趋势无主线，均衡配置"
-    if trend == "sideways":
-        return 40, 35, 25, "震荡+无主线，均衡配置"
-    return 30, 30, 40, "下跌趋势，防守为主"
-
-def main():
-    log("INFO", "="*70)
-    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.1）")
-    log("INFO", "="*70)
-    
-    sh_closes = get_index_data("sh000001", 100)
-    if not sh_closes:
-        log("ERROR", "无法获取指数数据，使用默认策略 rsi_reversion_v1")
-        with open("selected_strategy.txt", "w") as f:
-            f.write("rsi_reversion_v1")
-        return
-    cy_closes = get_index_data("sz399006", 100)
-    if not cy_closes:
-        cy_closes = sh_closes
-    
-    trend, tech_premium, ma20, ma60, momentum_20, current = detect_trend(sh_closes, cy_closes)
-    trend_desc = {"up":"上升趋势", "down":"下降趋势", "sideways":"震荡"}.get(trend, "未知")
+        trend = "震荡"
     
     if len(sh_closes) >= 20:
         ret_20 = (sh_closes[-1]/sh_closes[-20]-1)*100
@@ -195,33 +153,102 @@ def main():
     else:
         market_state = "normal"
     
-    log("INFO", "正在识别市场主线...")
-    main_group, main_strategy, confidence, confirm_days = identify_mainline()
+    tech_premium = 0
+    if cy_closes and len(cy_closes)>=20 and len(sh_closes)>=20:
+        ret_cy = (cy_closes[-1]/cy_closes[-20]-1)*100
+        ret_sh = (sh_closes[-1]/sh_closes[-20]-1)*100
+        tech_premium = round(ret_cy - ret_sh, 2)
     
-    # 策略决策（优先级）
+    pattern = "震荡"
+    if trend == "上升趋势":
+        pattern = "普涨"
+    elif trend == "下降趋势":
+        if mainline_result.get("confidence", 0) > 50 and mainline_result.get("relative_strength", 0) > 5:
+            pattern = "结构性行情"
+        else:
+            pattern = "普跌"
+    else:
+        if mainline_result.get("confidence", 0) > 50:
+            pattern = "结构性行情"
+    
+    log("DEBUG", f"趋势: {trend}, 市场状态: {market_state}, pattern: {pattern}, 科技溢价: {tech_premium}")
+    return trend, market_state, pattern, tech_premium, ma20, ma60, momentum_20, current
+
+def get_position_advice(trend, pattern, mainline_confidence, market_state):
+    if market_state == "extreme":
+        return 0, 0, 100, "极端模式，建议空仓观望"
+    if market_state == "high_risk":
+        return 30, 30, 40, "高风险模式，建议轻仓防守"
+    
+    if pattern == "普涨":
+        return 70, 20, 10, "普涨行情，积极配置"
+    elif pattern == "结构性行情":
+        if mainline_confidence > 70:
+            return 50, 30, 20, "结构性行情（高置信度），适度积极"
+        elif mainline_confidence > 50:
+            return 40, 35, 25, "结构性行情（中等置信度），温和配置"
+        else:
+            return 30, 35, 35, "结构性行情（低置信度），谨慎"
+    elif pattern == "普跌":
+        return 20, 30, 50, "普跌行情，防御为主"
+    else:
+        return 40, 30, 30, "震荡行情，均衡配置"
+
+def main():
+    log("INFO", "="*70)
+    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.3）")
+    log("INFO", "="*70)
+    
+    sh_closes = get_index_data("sh000001", 100)
+    if not sh_closes:
+        log("ERROR", "无法获取指数数据，使用默认策略 rsi_reversion_v1")
+        with open("selected_strategy.txt", "w") as f:
+            f.write("rsi_reversion_v1")
+        return
+    cy_closes = get_index_data("sz399006", 100)
+    if not cy_closes:
+        cy_closes = sh_closes
+    
+    # 主线识别（结构化）
+    log("INFO", "正在识别市场主线...")
+    mainline_result = identify_mainline()
+    
+    # 趋势和状态判断
+    trend, market_state, pattern, tech_premium, ma20, ma60, momentum_20, current = detect_trend_and_state(
+        sh_closes, cy_closes, mainline_result
+    )
+    
+    # 策略决策（通用化优先级）
+    strategy = None
+    reason = ""
+    
     if market_state in ("extreme", "high_risk"):
         strategy = "rsi_reversion_v1"
-        reason = f"{market_state}，使用防守策略"
-    elif main_group and confidence > 50:
-        strategy = main_strategy
-        reason = f"主线识别: {main_group}（置信度 {confidence:.0f}%）"
-    elif trend == "up" and tech_premium > 3:
+        reason = f"{market_state}，强制防守策略"
+    elif mainline_result.get("confidence", 0) > 50:
+        strategy = mainline_result.get("strategy", "balanced_alpha")
+        reason = f"主线识别: {mainline_result.get('main_group', '未知')}（置信度 {mainline_result.get('confidence', 0)}%）"
+    elif trend == "上升趋势":
         strategy = "trend_pullback_rebound"
-        reason = f"上升趋势 + 科技溢价 {tech_premium:.2f}%"
-    elif trend == "up":
-        # 上升趋势无主线：使用 volume_breakout（放量突破）
-        # 注：需确认 alphaevo/strategies/builtin/volume_breakout.yaml 存在
-        strategy = "volume_breakout"
-        reason = f"上升趋势 → 放量突破（动量 {momentum_20:.2f}%）"
+        reason = f"上升趋势，趋势跟踪策略"
+    elif trend == "震荡":
+        strategy = "balanced_alpha"
+        reason = "震荡行情，均衡配置"
     else:
         strategy = "rsi_reversion_v1"
-        reason = f"{trend_desc}（均值回归）"
+        reason = "下降趋势（无主线），均值回归防守"
     
-    main_pct, alt_pct, def_pct, pos_reason = get_position_advice(trend, market_state, confidence)
+    main_pct, alt_pct, def_pct, pos_reason = get_position_advice(
+        trend, pattern, mainline_result.get("confidence", 0), market_state
+    )
     
     log("INFO", f"📊 上证指数: {current:.2f}, MA20: {ma20:.2f}, MA60: {ma60:.2f}")
     log("INFO", f"📊 近20日动量: {momentum_20:.2f}%, 科技溢价: {tech_premium:.2f}%")
-    log("INFO", f"📊 趋势: {trend_desc}, 市场状态: {market_state}")
+    log("INFO", f"📊 趋势: {trend}, 市场状态: {market_state}, pattern: {pattern}")
+    if mainline_result.get("main_group"):
+        log("INFO", f"📊 主线: {mainline_result.get('main_group')} (置信度 {mainline_result.get('confidence')}%, 强度 {mainline_result.get('relative_strength', 0):.2f}%)")
+    else:
+        log("INFO", "📊 主线: 无")
     log("INFO", f"🎯 选定策略: {strategy}")
     log("INFO", f"📝 原因: {reason}")
     log("INFO", f"💰 仓位: 主{main_pct}% / 备{alt_pct}% / 防{def_pct}% - {pos_reason}")
@@ -233,14 +260,14 @@ def main():
     state = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "trend": trend,
-        "trend_desc": trend_desc,
+        "market_state": market_state,
+        "pattern": pattern,
         "strategy": strategy,
         "reason": reason,
-        "market_state": market_state,
-        "main_group": main_group,
-        "confidence": confidence,
-        "confirm_days": confirm_days,
-        "main_strategy": main_strategy,
+        "main_group": mainline_result.get("main_group"),
+        "main_confidence": mainline_result.get("confidence", 0),
+        "main_strength": mainline_result.get("relative_strength", 0),
+        "main_strategy": mainline_result.get("strategy"),
         "position_main": main_pct,
         "position_alt": alt_pct,
         "position_def": def_pct,
