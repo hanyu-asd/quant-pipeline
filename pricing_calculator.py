@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-买卖价格计算器 v3.3
+买卖价格计算器 v3.4
 - 52周高点校验（Baostock + TickFlow 双源）
 - 行业差异化盈亏比
-- 实时价格（腾讯 + 易方达AI + 新浪 + 缓存）
+- 实时价格（腾讯 + 新浪 + 缓存）
 - 准确性日志
 - Markdown报告输出
 - 独立邮件发送功能（含策略背景）
@@ -153,14 +153,20 @@ def get_52w_high(stock_code):
     except Exception as e:
         log("WARNING", f"Baostock 52周高点获取失败: {e}")
 
-    # 2. 尝试 TickFlow
+    # 2. 尝试 TickFlow（使用正确的 API）
     try:
-        import tickflow as tf
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=260)).strftime("%Y-%m-%d")
-        df = tf.get_daily(symbol=stock_code, market='cn',
-                          start_date=start_date, end_date=end_date)
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        market = 'SH' if stock_code.startswith('6') else 'SZ'
+        full_symbol = f"{stock_code}.{market}"
+        df = tf.klines.get(
+            symbol=full_symbol,
+            period="1d",
+            count=260,
+            as_dataframe=True
+        )
         if df is not None and len(df) > 0 and 'high' in df.columns:
+            df = df.sort_values('trade_date')
             high = df['high'].max()
             if high and high > 0:
                 return float(high)
@@ -171,7 +177,7 @@ def get_52w_high(stock_code):
 
 
 # ============================================================
-# 实时价格获取（腾讯 + 易方达AI + 新浪 + 缓存）
+# 实时价格获取（腾讯 + 新浪 + 缓存）
 # ============================================================
 def ensure_cache_dir():
     if not os.path.exists(CACHE_DIR):
@@ -241,26 +247,6 @@ def get_price_tencent(stock_code):
         return None
 
 
-def get_price_efunds(stock_code):
-    """易方达 AI Skills 实时价格"""
-    api_key = os.environ.get('EFUNDS_API_KEY')
-    if not api_key:
-        return None
-    try:
-        url = f"https://api.efunds.com.cn/aiskills/etf/price?symbol={stock_code}"
-        headers = {'Authorization': f'Bearer {api_key}'}
-        resp = requests.get(url, headers=headers, timeout=5)
-        if resp.status_code == 200:
-            data = resp.json()
-            price = data.get('price')
-            if price and 0 < float(price) < 10000:
-                return float(price)
-        return None
-    except Exception as e:
-        log("WARNING", f"[易方达AI] 获取价格 {stock_code} 失败: {e}")
-        return None
-
-
 def get_price_sina(stock_code):
     try:
         prefix = "sh" if stock_code.startswith('6') else "sz"
@@ -327,21 +313,14 @@ def get_stock_realtime_price(stock_code):
         save_cache_price(stock_code, price)
         return price
 
-    # 3. 易方达 AI Skills
-    log("WARNING", f"腾讯失败，切换易方达AI: {stock_code}")
-    price = get_price_efunds(stock_code)
-    if price:
-        save_cache_price(stock_code, price)
-        return price
-
-    # 4. 新浪财经
-    log("WARNING", f"易方达AI失败，切换新浪: {stock_code}")
+    # 3. 新浪财经
+    log("WARNING", f"腾讯失败，切换新浪: {stock_code}")
     price = get_price_sina(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
 
-    # 5. Baostock 前日收盘价（兜底）
+    # 4. Baostock 前日收盘价（兜底）
     log("WARNING", f"新浪失败，使用Baostock前日收盘价: {stock_code}")
     price = get_price_baostock_cache(stock_code)
     if price:
@@ -534,7 +513,7 @@ def main():
     args = parser.parse_args()
 
     log("INFO", "=" * 60)
-    log("INFO", "📊 买卖价格计算器 v3.3")
+    log("INFO", "📊 买卖价格计算器 v3.4")
     log("INFO", "=" * 60)
 
     if os.environ.get("DEBUG_MODE") == "true":
