@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-买卖价格计算器 v3.4
-- 52周高点校验（Baostock + TickFlow 双源）
+买卖价格计算器 v3.5
+- 52周高点校验（TickFlow 优先，Baostock 备选）
 - 行业差异化盈亏比
-- 实时价格（腾讯 + 新浪 + 缓存）
+- 盘后价格获取（缓存 → TickFlow → 腾讯财经 → 新浪 → Baostock 前日收盘价）
 - 准确性日志
 - Markdown报告输出
 - 独立邮件发送功能（含策略背景）
@@ -124,10 +124,31 @@ def get_take_profit_rr(category):
 
 
 # ============================================================
-# 52周高点获取（Baostock + TickFlow 双源）
+# 52周高点获取（TickFlow 优先，Baostock 备选）
 # ============================================================
 def get_52w_high(stock_code):
-    # 1. 尝试 Baostock
+    # 1. 首选 TickFlow
+    try:
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        market = 'SH' if stock_code.startswith('6') else 'SZ'
+        full_symbol = f"{stock_code}.{market}"
+        df = tf.klines.get(
+            symbol=full_symbol,
+            period="1d",
+            count=260,
+            as_dataframe=True
+        )
+        if df is not None and len(df) > 0 and 'high' in df.columns:
+            df = df.sort_values('trade_date')
+            high = df['high'].max()
+            if high and high > 0:
+                log("DEBUG", f"TickFlow 获取 {stock_code} 52周高点成功: {high}")
+                return float(high)
+    except Exception as e:
+        log("WARNING", f"TickFlow 52周高点获取失败: {e}")
+
+    # 2. 备选 Baostock
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -153,31 +174,11 @@ def get_52w_high(stock_code):
     except Exception as e:
         log("WARNING", f"Baostock 52周高点获取失败: {e}")
 
-    # 2. 尝试 TickFlow（使用正确的 API）
-    try:
-        from tickflow import TickFlow
-        tf = TickFlow.free()
-        market = 'SH' if stock_code.startswith('6') else 'SZ'
-        full_symbol = f"{stock_code}.{market}"
-        df = tf.klines.get(
-            symbol=full_symbol,
-            period="1d",
-            count=260,
-            as_dataframe=True
-        )
-        if df is not None and len(df) > 0 and 'high' in df.columns:
-            df = df.sort_values('trade_date')
-            high = df['high'].max()
-            if high and high > 0:
-                return float(high)
-    except Exception as e:
-        log("WARNING", f"TickFlow 52周高点获取失败: {e}")
-
     return None
 
 
 # ============================================================
-# 实时价格获取（腾讯 + 新浪 + 缓存）
+# 盘后价格获取（缓存 → TickFlow → 腾讯财经 → 新浪 → Baostock 前日收盘价）
 # ============================================================
 def ensure_cache_dir():
     if not os.path.exists(CACHE_DIR):
@@ -191,6 +192,7 @@ def get_cached_price(stock_code):
         try:
             with open(cache_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
+                # 只有日期是今天才返回缓存，否则视为无效
                 if data.get('date') == datetime.now().strftime("%Y-%m-%d"):
                     return data.get('price')
         except:
@@ -206,6 +208,31 @@ def save_cache_price(stock_code, price):
             json.dump({"date": datetime.now().strftime("%Y-%m-%d"), "price": price}, f)
     except:
         pass
+
+
+def get_price_tickflow(stock_code):
+    """使用 TickFlow 获取当日收盘价"""
+    try:
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        market = 'SH' if stock_code.startswith('6') else 'SZ'
+        full_symbol = f"{stock_code}.{market}"
+        df = tf.klines.get(
+            symbol=full_symbol,
+            period="1d",
+            count=1,  # 只取最近1条（当日）
+            as_dataframe=True
+        )
+        if df is not None and len(df) > 0 and 'close' in df.columns:
+            df = df.sort_values('trade_date')
+            price = float(df['close'].iloc[-1])
+            if 0 < price < 10000:
+                log("DEBUG", f"TickFlow 获取 {stock_code} 收盘价成功: {price}")
+                return price
+        return None
+    except Exception as e:
+        log("WARNING", f"TickFlow 价格获取失败 {stock_code}: {e}")
+        return None
 
 
 def parse_tencent_price(text):
@@ -231,6 +258,7 @@ def parse_tencent_price(text):
 
 
 def get_price_tencent(stock_code):
+    """从腾讯财经获取当日收盘价"""
     try:
         prefix = "sh" if stock_code.startswith('6') else "sz"
         url = f"https://qt.gtimg.cn/q={prefix}{stock_code}"
@@ -248,6 +276,7 @@ def get_price_tencent(stock_code):
 
 
 def get_price_sina(stock_code):
+    """从新浪财经获取当日收盘价"""
     try:
         prefix = "sh" if stock_code.startswith('6') else "sz"
         url = f"https://hq.sinajs.cn/list={prefix}{stock_code}"
@@ -273,6 +302,7 @@ def get_price_sina(stock_code):
 
 
 def get_price_baostock_cache(stock_code):
+    """从 Baostock 获取前日收盘价（兜底）"""
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -301,26 +331,37 @@ def get_price_baostock_cache(stock_code):
         return None
 
 
-def get_stock_realtime_price(stock_code):
-    # 1. 缓存
+def get_stock_close_price(stock_code):
+    """
+    获取股票当日收盘价（盘后运行）
+    优先级：缓存 → TickFlow → 腾讯财经 → 新浪财经 → Baostock 前日收盘价
+    """
+    # 1. 检查缓存（当天有效）
     cached = get_cached_price(stock_code)
     if cached:
         return cached
 
-    # 2. 腾讯财经
+    # 2. TickFlow（当日日线收盘价）
+    price = get_price_tickflow(stock_code)
+    if price:
+        save_cache_price(stock_code, price)
+        return price
+
+    # 3. 腾讯财经（当日收盘价）
+    log("WARNING", f"TickFlow失败，切换腾讯: {stock_code}")
     price = get_price_tencent(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
 
-    # 3. 新浪财经
+    # 4. 新浪财经（当日收盘价）
     log("WARNING", f"腾讯失败，切换新浪: {stock_code}")
     price = get_price_sina(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
 
-    # 4. Baostock 前日收盘价（兜底）
+    # 5. Baostock 前日收盘价（兜底）
     log("WARNING", f"新浪失败，使用Baostock前日收盘价: {stock_code}")
     price = get_price_baostock_cache(stock_code)
     if price:
@@ -513,7 +554,7 @@ def main():
     args = parser.parse_args()
 
     log("INFO", "=" * 60)
-    log("INFO", "📊 买卖价格计算器 v3.4")
+    log("INFO", "📊 买卖价格计算器 v3.5")
     log("INFO", "=" * 60)
 
     if os.environ.get("DEBUG_MODE") == "true":
@@ -550,7 +591,7 @@ def main():
             pricing_results.append(None)
             continue
 
-        current_price = get_stock_realtime_price(code)
+        current_price = get_stock_close_price(code)
         pricing = calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct, take_profit_rr, code)
         if not pricing:
             pricing_results.append(None)
