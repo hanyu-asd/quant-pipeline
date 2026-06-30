@@ -127,8 +127,6 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
-          # 易方达 AI Skills API Key（新增）
-          EFUNDS_API_KEY: ${{ secrets.EFUNDS_API_KEY }}
         run: |
           cd daily_stock_analysis
           python main.py
@@ -145,7 +143,6 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
-          EFUNDS_API_KEY: ${{ secrets.EFUNDS_API_KEY }}
         run: |
           cd ${{ github.workspace }}
           python pricing_calculator.py --send-email

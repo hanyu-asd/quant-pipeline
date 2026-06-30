@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.7 - 集成 TickFlow + 易方达 AI Skills 作为指数数据源
+v6.8 - 修正 TickFlow API，移除易方达 AI
 """
 import requests
 import json
@@ -85,42 +85,26 @@ def get_index_history_baostock(symbol, days=100):
 
 
 def get_index_history_tickflow(symbol, days=100):
-    """使用 TickFlow 获取指数日线数据"""
+    """使用 TickFlow 获取指数日线数据（正确 API）"""
     try:
-        import tickflow as tf
-        # symbol 格式为 'sh000001' 或 'sz399006'
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        # 转换 symbol: sh000001 → 000001.SH
         code = symbol.replace('sh', '').replace('sz', '')
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        df = tf.get_daily(symbol=code, market='cn',
-                          start_date=start_date, end_date=end_date)
-        if df is None or len(df) < 10:
-            return None
-        return df['close'].values.tolist()
+        market = 'SH' if 'sh' in symbol else 'SZ'
+        full_symbol = f"{code}.{market}"
+        df = tf.klines.get(
+            symbol=full_symbol,
+            period="1d",
+            count=days,
+            as_dataframe=True
+        )
+        if df is not None and len(df) >= 10:
+            df = df.sort_values('trade_date')
+            return df['close'].values.tolist()
+        return None
     except Exception as e:
         log("WARNING", f"[TickFlow] 获取指数 {symbol} 失败: {e}")
-        return None
-
-
-def get_index_history_efunds(symbol, days=100):
-    """使用易方达 AI Skills 获取指数行情（需 API Key）"""
-    api_key = os.environ.get('EFUNDS_API_KEY')
-    if not api_key:
-        return None
-    try:
-        code = symbol.replace('sh', '').replace('sz', '')
-        url = f"https://api.efunds.com.cn/aiskills/index/quote?code={code}&period=day&count={days}"
-        headers = {'Authorization': f'Bearer {api_key}'}
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
-            # 根据实际返回格式解析（假设返回 closes 列表）
-            closes = data.get('closes') or data.get('data', {}).get('closes')
-            if closes and len(closes) >= 10:
-                return [float(x) for x in closes]
-        return None
-    except Exception as e:
-        log("WARNING", f"[易方达AI] 获取指数 {symbol} 失败: {e}")
         return None
 
 
@@ -201,28 +185,21 @@ def get_index_data(symbol, days=100):
         log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")
         return closes
 
-    # 3. 易方达 AI Skills
-    log("WARNING", f"  TickFlow失败，切换易方达AI")
-    closes = get_index_history_efunds(symbol, days)
-    if closes:
-        log("INFO", f"  ✅ 易方达AI成功: {len(closes)}个交易日")
-        return closes
-
-    # 4. 新浪
-    log("WARNING", f"  易方达AI失败，切换新浪财经")
+    # 3. 新浪
+    log("WARNING", f"  TickFlow失败，切换新浪财经")
     closes = get_index_history_sina(symbol, days)
     if closes:
         log("INFO", f"  ✅ 新浪财经成功: {len(closes)}个交易日")
         return closes
 
-    # 5. 腾讯
+    # 4. 腾讯
     log("WARNING", f"  新浪失败，切换腾讯财经")
     closes = get_index_history_tencent(symbol, days)
     if closes:
         log("INFO", f"  ✅ 腾讯财经成功: {len(closes)}个交易日")
         return closes
 
-    # 6. AkShare
+    # 5. AkShare
     log("WARNING", f"  腾讯失败，切换AkShare")
     closes = get_index_history_akshare(symbol, days)
     if closes:
@@ -337,7 +314,7 @@ def generate_default_market_state():
 
 def main():
     log("INFO", "=" * 70)
-    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.7）")
+    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.8）")
     log("INFO", "=" * 70)
 
     # 获取上证指数数据（优先实时，缓存仅作兜底）

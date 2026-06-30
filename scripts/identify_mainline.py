@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.5 - 集成 TickFlow 作为 ETF 历史数据源
+v6.6 - 修正 TickFlow API 调用
 """
 import json
 import sys
@@ -72,18 +72,26 @@ init_etf_status()
 
 
 # ============================================================
-# ETF 数据源：TickFlow（新增）
+# ETF 数据源：TickFlow（正确 API）
 # ============================================================
 def get_etf_data_tickflow(code, days=80):
+    """使用 TickFlow 获取 ETF 日线数据（正确 API）"""
     try:
-        import tickflow as tf
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        df = tf.get_daily(symbol=code, market='cn',
-                          start_date=start_date, end_date=end_date)
-        if df is None or len(df) < 60:
-            return None
-        return df['close'].values.tolist()
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        # 确定市场后缀
+        market = 'SH' if code.startswith('6') else 'SZ'
+        full_symbol = f"{code}.{market}"
+        df = tf.klines.get(
+            symbol=full_symbol,
+            period="1d",
+            count=days,
+            as_dataframe=True
+        )
+        if df is not None and len(df) >= 60:
+            df = df.sort_values('trade_date')
+            return df['close'].values.tolist()
+        return None
     except Exception as e:
         log("WARNING", f"[TickFlow] 获取 {code} 失败: {e}")
         return None
