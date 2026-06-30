@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.9 - 优先使用 TickFlow，Baostock 降级为备选
+v6.8 - 独立 Baostock 登录，增强 TickFlow 容错
 """
 import json
 import sys
@@ -57,34 +57,10 @@ init_etf_status()
 
 
 # ============================================================
-# 数据源：TickFlow（首选）
-# ============================================================
-def get_etf_data_tickflow(code, days=80):
-    """使用 TickFlow 获取 ETF 日线数据"""
-    try:
-        from tickflow import TickFlow
-        tf = TickFlow.free()
-        # 尝试常用格式
-        sym = f"{code}.SH" if code.startswith('6') else f"{code}.SZ"
-        df = tf.klines.get(
-            symbol=sym,
-            period="1d",
-            count=days,
-            as_dataframe=True
-        )
-        if df is not None and len(df) >= 60:
-            df = df.sort_values('trade_date')
-            return df['close'].values.tolist()
-        return None
-    except Exception as e:
-        log("WARNING", f"[TickFlow] 获取 {code} 失败: {e}")
-        return None
-
-
-# ============================================================
-# 备选数据源：Baostock（独立登录）
+# 数据源：Baostock（独立登录）
 # ============================================================
 def get_etf_data_baostock(code, days=80):
+    """独立登录查询 Baostock ETF 数据"""
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -107,6 +83,35 @@ def get_etf_data_baostock(code, days=80):
         return [float(x) for x in data['close'].tolist()]
     except Exception as e:
         log("WARNING", f"[Baostock] 获取 {code} 失败: {e}")
+        return None
+
+
+# ============================================================
+# 数据源：TickFlow（ETF）
+# ============================================================
+def get_etf_data_tickflow(code, days=80):
+    try:
+        from tickflow import TickFlow
+        tf = TickFlow.free()
+        # 尝试两种格式
+        formats = [f"{code}.SH", f"{code}.SZ", f"sh{code}", f"sz{code}"]
+        for sym in formats:
+            try:
+                df = tf.klines.get(
+                    symbol=sym,
+                    period="1d",
+                    count=days,
+                    as_dataframe=True
+                )
+                if df is not None and len(df) >= 60:
+                    df = df.sort_values('trade_date')
+                    log("DEBUG", f"TickFlow 成功格式: {sym}")
+                    return df['close'].values.tolist()
+            except:
+                continue
+        return None
+    except Exception as e:
+        log("WARNING", f"[TickFlow] 获取 {code} 失败: {e}")
         return None
 
 
@@ -149,7 +154,6 @@ def get_etf_data_akshare(code, days=80):
 
 
 def get_benchmark_data(days=80):
-    """获取沪深300基准数据（使用 Baostock）"""
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -175,29 +179,31 @@ def get_benchmark_data(days=80):
 
 
 # ============================================================
-# 主获取逻辑（TickFlow 优先，逐步降级）
+# 主获取逻辑（多源备份）
 # ============================================================
 def get_etf_data_with_fallback(code, days=80):
+    """
+    按顺序尝试多个数据源：Baostock → TickFlow → Tushare → AkShare
+    """
+    # 1. Baostock
     log("INFO", f"获取ETF {code} 数据...")
-
-    # 1. 首选 TickFlow
-    closes = get_etf_data_tickflow(code, days)
-    if closes:
-        log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")
-        ETF_STATUS[code]["fail_count"] = 0
-        ETF_STATUS[code]["status"] = "active"
-        return closes
-
-    # 2. Baostock
-    log("WARNING", f"  TickFlow失败，尝试Baostock: {code}")
     closes = get_etf_data_baostock(code, days)
     if closes:
         log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
         ETF_STATUS[code]["fail_count"] = 0
+        ETF_STATUS[code]["status"] = "active"
         return closes
     else:
         ETF_STATUS[code]["fail_count"] += 1
         log("WARNING", f"  Baostock获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
+
+    # 2. TickFlow
+    log("WARNING", f"  尝试TickFlow: {code}")
+    closes = get_etf_data_tickflow(code, days)
+    if closes:
+        log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
+        return closes
 
     # 3. 备选ETF切换（连续失败>=3）
     if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
@@ -205,12 +211,7 @@ def get_etf_data_with_fallback(code, days=80):
         log("INFO", f"  切换到备选ETF {backup_code}")
         ETF_STATUS[code]["status"] = "degraded"
         ETF_STATUS[code]["last_switch"] = datetime.now().strftime("%Y-%m-%d")
-        # 备选也先用 TickFlow 尝试
-        closes = get_etf_data_tickflow(backup_code, days)
-        if not closes:
-            closes = get_etf_data_baostock(backup_code, days)
-        if not closes:
-            closes = get_etf_data_tushare(backup_code, days)
+        closes = get_etf_data_tushare(backup_code, days)
         if not closes:
             closes = get_etf_data_akshare(backup_code, days)
         if closes:
@@ -282,7 +283,7 @@ def identify_mainline():
             "group": info["group"],
             "combined": combined
         })
-        time.sleep(0.3)  # 频率控制
+        time.sleep(0.5)  # 增加延迟，降低请求频率
 
     if not scores:
         log("WARNING", "无ETF数据，使用默认策略")
