@@ -118,8 +118,8 @@ jobs:
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           # 魔塔模型 ID
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          # LiteLLM 模型变量（直接使用魔塔模型 ID）
-          LITELLM_MODEL: ${{ secrets.OPENAI_MODEL }}
+          # ⚠️ 关键修复：加 openai/ 前缀，强制 LiteLLM 走 OpenAI 兼容模式
+          LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
           # === 其他配置 ===
           STOCK_LIST: ${{ env.STOCK_LIST }}
           EMAIL_ENABLED: false
