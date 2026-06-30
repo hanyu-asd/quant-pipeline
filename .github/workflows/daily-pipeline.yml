@@ -38,6 +38,11 @@ jobs:
 
       - name: Install dependencies
         run: |
+          # 配置pip使用清华镜像源，增加超时和重试
+          pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip config set global.timeout 120
+          pip config set global.retries 5
+          
           cd daily_stock_analysis
           pip install -r requirements.txt
           pip install -e .
@@ -110,15 +115,12 @@ jobs:
       - name: daily_stock_analysis 深度分析
         if: github.event.inputs.dry_run != 'true'
         env:
-          # === LLM 配置（魔塔社区 API） ===
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           OPENAI_API_BASE: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
-          # === 其他配置 ===
           STOCK_LIST: ${{ env.STOCK_LIST }}
-          # 启用 daily_stock_analysis 自身的邮件发送
           EMAIL_ENABLED: true
           SEND_EMAIL: true
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
