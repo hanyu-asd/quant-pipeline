@@ -38,7 +38,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # 配置pip使用清华镜像源，增加超时和重试
+          # 配置pip镜像源（加速下载）
           pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip config set global.timeout 120
           pip config set global.retries 5
@@ -51,7 +51,8 @@ jobs:
           pip install -e .
           cd ../alphaevo
           pip install -e .
-          pip install requests baostock akshare pandas numpy tushare
+          # 基础数据源 + TickFlow（新增）
+          pip install requests baostock akshare pandas numpy tushare tickflow
 
       - name: 动态主线识别 + 策略选择
         id: mainline_strategy
@@ -126,6 +127,8 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+          # 易方达 AI Skills API Key（新增）
+          EFUNDS_API_KEY: ${{ secrets.EFUNDS_API_KEY }}
         run: |
           cd daily_stock_analysis
           python main.py
@@ -142,6 +145,7 @@ jobs:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
+          EFUNDS_API_KEY: ${{ secrets.EFUNDS_API_KEY }}
         run: |
           cd ${{ github.workspace }}
           python pricing_calculator.py --send-email

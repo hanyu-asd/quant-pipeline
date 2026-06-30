@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.4 - 复用Baostock登录会话 + 请求延迟，避免限流
+v6.5 - 集成 TickFlow 作为 ETF 历史数据源
 """
 import json
 import sys
@@ -60,7 +60,6 @@ STRATEGY_MAP = {
 }
 DEFAULT_STRATEGY = "balanced_alpha"
 
-# ETF 状态跟踪（简化）
 ETF_STATUS = {}
 
 
@@ -73,8 +72,23 @@ init_etf_status()
 
 
 # ============================================================
-# 备选数据源：Tushare / AkShare
+# ETF 数据源：TickFlow（新增）
 # ============================================================
+def get_etf_data_tickflow(code, days=80):
+    try:
+        import tickflow as tf
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
+        df = tf.get_daily(symbol=code, market='cn',
+                          start_date=start_date, end_date=end_date)
+        if df is None or len(df) < 60:
+            return None
+        return df['close'].values.tolist()
+    except Exception as e:
+        log("WARNING", f"[TickFlow] 获取 {code} 失败: {e}")
+        return None
+
+
 def get_etf_data_tushare(code, days=80):
     try:
         import tushare as ts
@@ -111,9 +125,6 @@ def get_etf_data_akshare(code, days=80):
 
 
 def get_benchmark_data(days=80):
-    """
-    获取沪深300基准数据（独立登录）
-    """
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -139,20 +150,16 @@ def get_benchmark_data(days=80):
 
 
 def _fetch_etf_from_baostock_with_session(code, days, bs_session):
-    """
-    使用已存在的 bs 会话获取ETF数据，避免重复登录
-    """
     try:
         import baostock as bs
         prefix = "sh" if code.startswith('6') else "sz"
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        # 关键修复：调用模块函数，传入 connection 参数
         rs = bs.query_history_k_data_plus(
             f"{prefix}.{code}", "date,close",
             start_date=start_date, end_date=end_date,
             frequency="d", adjustflag="3",
-            connection=bs_session   # 传入会话对象
+            connection=bs_session
         )
         if rs.error_code != '0':
             return None
@@ -166,10 +173,7 @@ def _fetch_etf_from_baostock_with_session(code, days, bs_session):
 
 
 def get_etf_data_with_fallback(code, days, bs_session=None):
-    """
-    获取ETF数据：优先使用Baostock会话，失败则尝试Tushare/AkShare
-    """
-    # 1. 使用已有的Baostock会话
+    # 1. Baostock 会话
     if bs_session is not None:
         closes = _fetch_etf_from_baostock_with_session(code, days, bs_session)
         if closes:
@@ -183,13 +187,20 @@ def get_etf_data_with_fallback(code, days, bs_session=None):
     else:
         log("WARNING", f"  无Baostock会话，跳过主源")
 
-    # 2. 尝试备选ETF（如果连续失败>=3且存在备选）
+    # 2. TickFlow
+    log("WARNING", f"  尝试TickFlow: {code}")
+    closes = get_etf_data_tickflow(code, days)
+    if closes:
+        log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
+        return closes
+
+    # 3. 备选ETF切换（连续失败>=3）
     if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
         backup_code = ETF_MAP[code]["backup"]
         log("INFO", f"  切换到备选ETF {backup_code}")
         ETF_STATUS[code]["status"] = "degraded"
         ETF_STATUS[code]["last_switch"] = datetime.now().strftime("%Y-%m-%d")
-        # 尝试用Tushare/AkShare获取备选
         closes = get_etf_data_tushare(backup_code, days)
         if not closes:
             closes = get_etf_data_akshare(backup_code, days)
@@ -198,7 +209,7 @@ def get_etf_data_with_fallback(code, days, bs_session=None):
             ETF_STATUS[code]["fail_count"] = 0
             return closes
 
-    # 3. 尝试Tushare
+    # 4. Tushare
     log("WARNING", f"  尝试Tushare: {code}")
     closes = get_etf_data_tushare(code, days)
     if closes:
@@ -206,7 +217,7 @@ def get_etf_data_with_fallback(code, days, bs_session=None):
         ETF_STATUS[code]["fail_count"] = 0
         return closes
 
-    # 4. 尝试AkShare
+    # 5. AkShare
     log("WARNING", f"  尝试AkShare: {code}")
     closes = get_etf_data_akshare(code, days)
     if closes:
@@ -218,19 +229,16 @@ def get_etf_data_with_fallback(code, days, bs_session=None):
     return None
 
 
-# ============================================================
-# 核心计算
-# ============================================================
 def calculate_relative_strength(etf_closes, benchmark_closes):
-    if not etf_closes or not benchmark_closes or len(etf_closes)<5 or len(benchmark_closes)<5:
-        return 0,0,0
-    etf_5 = (etf_closes[-1]/etf_closes[-6]-1)*100 if len(etf_closes)>5 else 0
-    etf_20 = (etf_closes[-1]/etf_closes[-21]-1)*100 if len(etf_closes)>20 else 0
-    etf_60 = (etf_closes[-1]/etf_closes[-61]-1)*100 if len(etf_closes)>60 else 0
-    bench_5 = (benchmark_closes[-1]/benchmark_closes[-6]-1)*100 if len(benchmark_closes)>5 else 0
-    bench_20 = (benchmark_closes[-1]/benchmark_closes[-21]-1)*100 if len(benchmark_closes)>20 else 0
-    bench_60 = (benchmark_closes[-1]/benchmark_closes[-61]-1)*100 if len(benchmark_closes)>60 else 0
-    return etf_5-bench_5, etf_20-bench_20, etf_60-bench_60
+    if not etf_closes or not benchmark_closes or len(etf_closes) < 5 or len(benchmark_closes) < 5:
+        return 0, 0, 0
+    etf_5 = (etf_closes[-1] / etf_closes[-6] - 1) * 100 if len(etf_closes) > 5 else 0
+    etf_20 = (etf_closes[-1] / etf_closes[-21] - 1) * 100 if len(etf_closes) > 20 else 0
+    etf_60 = (etf_closes[-1] / etf_closes[-61] - 1) * 100 if len(etf_closes) > 60 else 0
+    bench_5 = (benchmark_closes[-1] / benchmark_closes[-6] - 1) * 100 if len(benchmark_closes) > 5 else 0
+    bench_20 = (benchmark_closes[-1] / benchmark_closes[-21] - 1) * 100 if len(benchmark_closes) > 20 else 0
+    bench_60 = (benchmark_closes[-1] / benchmark_closes[-61] - 1) * 100 if len(benchmark_closes) > 60 else 0
+    return etf_5 - bench_5, etf_20 - bench_20, etf_60 - bench_60
 
 
 def identify_mainline():
@@ -247,12 +255,11 @@ def identify_mainline():
             "ranking": 0
         }
 
-    # 登录Baostock（仅一次）
     import baostock as bs
     log("INFO", "登录Baostock获取ETF数据...")
     lg = bs.login()
     if lg.error_code != '0':
-        log("WARNING", f"Baostock登录失败: {lg.error_msg}，将仅使用Tushare/AkShare")
+        log("WARNING", f"Baostock登录失败: {lg.error_msg}，将仅使用TickFlow/Tushare/AkShare")
         bs_session = None
     else:
         bs_session = lg
@@ -261,25 +268,19 @@ def identify_mainline():
     for code, info in ETF_MAP.items():
         if ETF_STATUS.get(code, {}).get("status") == "disabled":
             continue
-        
-        # 获取ETF数据（传入会话）
         etf = get_etf_data_with_fallback(code, 80, bs_session)
         if not etf:
             continue
-        
         rs_5, rs_20, rs_60 = calculate_relative_strength(etf, benchmark)
-        combined = rs_5*0.3 + rs_20*0.5 + rs_60*0.2
+        combined = rs_5 * 0.3 + rs_20 * 0.5 + rs_60 * 0.2
         scores.append({
             "code": code,
             "name": info["name"],
             "group": info["group"],
             "combined": combined
         })
-        
-        # 增加延迟，降低请求频率
-        time.sleep(0.3)
+        time.sleep(0.3)  # 频率控制
 
-    # 登出Baostock
     if bs_session is not None:
         bs.logout()
         log("INFO", "Baostock登出")
@@ -297,8 +298,6 @@ def identify_mainline():
         }
 
     scores = sorted(scores, key=lambda x: x["combined"], reverse=True)
-    top = scores[0]
-
     top_groups = [s["group"] for s in scores[:5]]
     group_counts = {}
     for g in top_groups:
@@ -311,23 +310,21 @@ def identify_mainline():
     etf_count = 0
     ranking = 0
 
-    # 第一档：≥3只同组
     for group, count in group_counts.items():
         if count >= 3:
             main_group = group
             confidence = 80
             group_scores = [s["combined"] for s in scores if s["group"] == group]
-            main_strength = sum(group_scores)/len(group_scores) if group_scores else 0
+            main_strength = sum(group_scores) / len(group_scores) if group_scores else 0
             etf_count = len(group_scores)
             confirm_days = 2 if main_strength > 7 else 3
             break
 
-    # 第二档：2只同组 + 强度>5%
     if not main_group:
         for group, count in group_counts.items():
             if count >= 2:
                 group_scores = [s["combined"] for s in scores if s["group"] == group]
-                avg_strength = sum(group_scores)/len(group_scores) if group_scores else 0
+                avg_strength = sum(group_scores) / len(group_scores) if group_scores else 0
                 if avg_strength > 5:
                     main_group = group
                     confidence = 60
@@ -348,23 +345,21 @@ def identify_mainline():
             "ranking": 0
         }
 
-    # 主线去重
     strategy = STRATEGY_MAP.get(main_group, DEFAULT_STRATEGY)
     same_strategy_groups = [g for g, s in STRATEGY_MAP.items() if s == strategy and g in group_counts]
     if len(same_strategy_groups) > 1:
         group_avg = {}
         for g in same_strategy_groups:
             gs = [s["combined"] for s in scores if s["group"] == g]
-            group_avg[g] = sum(gs)/len(gs) if gs else 0
+            group_avg[g] = sum(gs) / len(gs) if gs else 0
         main_group = max(group_avg, key=group_avg.get)
         main_strength = group_avg[main_group]
         log("INFO", f"主线去重: {same_strategy_groups} → 选择 {main_group} (强度 {main_strength:.2f}%)")
 
-    # 计算排名
     group_avg_all = {}
     for group in group_counts.keys():
         gs = [s["combined"] for s in scores if s["group"] == group]
-        group_avg_all[group] = sum(gs)/len(gs) if gs else 0
+        group_avg_all[group] = sum(gs) / len(gs) if gs else 0
     sorted_groups = sorted(group_avg_all.items(), key=lambda x: x[1], reverse=True)
     ranking = [g[0] for g in sorted_groups].index(main_group) + 1
 

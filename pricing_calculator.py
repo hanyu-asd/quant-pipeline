@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-买卖价格计算器 v3.2
-- 52周高点校验
+买卖价格计算器 v3.3
+- 52周高点校验（Baostock + TickFlow 双源）
 - 行业差异化盈亏比
-- 腾讯财经API健壮化
+- 实时价格（腾讯 + 易方达AI + 新浪 + 缓存）
 - 准确性日志
 - Markdown报告输出
-- 独立邮件发送功能
-- 策略背景说明（从strategy_context.json读取）
+- 独立邮件发送功能（含策略背景）
 """
 import yaml
 import json
@@ -34,9 +33,6 @@ INDUSTRY_FILE = "scripts/industry_mapping.json"
 STRATEGY_CONTEXT_FILE = "strategy_context.json"
 
 
-# ============================================================
-# 数据加载
-# ============================================================
 def load_industry_mapping():
     if not os.path.exists(INDUSTRY_FILE):
         log("WARNING", f"行业映射文件不存在: {INDUSTRY_FILE}")
@@ -128,9 +124,10 @@ def get_take_profit_rr(category):
 
 
 # ============================================================
-# 52周高点获取（复用数据源备份）
+# 52周高点获取（Baostock + TickFlow 双源）
 # ============================================================
 def get_52w_high(stock_code):
+    # 1. 尝试 Baostock
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -138,7 +135,7 @@ def get_52w_high(stock_code):
         prefix = "sh" if stock_code.startswith('6') else "sz"
         lg = bs.login()
         if lg.error_code != '0':
-            return None
+            raise Exception("Baostock login failed")
         rs = bs.query_history_k_data_plus(
             f"{prefix}.{stock_code}", "date,high",
             start_date=start_date, end_date=end_date,
@@ -146,19 +143,35 @@ def get_52w_high(stock_code):
         )
         bs.logout()
         if rs.error_code != '0':
-            return None
+            raise Exception("Baostock query failed")
         data = rs.get_data()
         if data is None or len(data) == 0:
-            return None
+            raise Exception("No data")
         highs = [float(x) for x in data['high'].tolist()]
-        return max(highs) if highs else None
+        if highs:
+            return max(highs)
     except Exception as e:
-        log("WARNING", f"获取 {stock_code} 52周高点失败: {e}")
-        return None
+        log("WARNING", f"Baostock 52周高点获取失败: {e}")
+
+    # 2. 尝试 TickFlow
+    try:
+        import tickflow as tf
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=260)).strftime("%Y-%m-%d")
+        df = tf.get_daily(symbol=stock_code, market='cn',
+                          start_date=start_date, end_date=end_date)
+        if df is not None and len(df) > 0 and 'high' in df.columns:
+            high = df['high'].max()
+            if high and high > 0:
+                return float(high)
+    except Exception as e:
+        log("WARNING", f"TickFlow 52周高点获取失败: {e}")
+
+    return None
 
 
 # ============================================================
-# 价格获取（健壮化腾讯解析）
+# 实时价格获取（腾讯 + 易方达AI + 新浪 + 缓存）
 # ============================================================
 def ensure_cache_dir():
     if not os.path.exists(CACHE_DIR):
@@ -228,6 +241,26 @@ def get_price_tencent(stock_code):
         return None
 
 
+def get_price_efunds(stock_code):
+    """易方达 AI Skills 实时价格"""
+    api_key = os.environ.get('EFUNDS_API_KEY')
+    if not api_key:
+        return None
+    try:
+        url = f"https://api.efunds.com.cn/aiskills/etf/price?symbol={stock_code}"
+        headers = {'Authorization': f'Bearer {api_key}'}
+        resp = requests.get(url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            price = data.get('price')
+            if price and 0 < float(price) < 10000:
+                return float(price)
+        return None
+    except Exception as e:
+        log("WARNING", f"[易方达AI] 获取价格 {stock_code} 失败: {e}")
+        return None
+
+
 def get_price_sina(stock_code):
     try:
         prefix = "sh" if stock_code.startswith('6') else "sz"
@@ -283,23 +316,38 @@ def get_price_baostock_cache(stock_code):
 
 
 def get_stock_realtime_price(stock_code):
+    # 1. 缓存
     cached = get_cached_price(stock_code)
     if cached:
         return cached
+
+    # 2. 腾讯财经
     price = get_price_tencent(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
-    log("WARNING", f"腾讯失败，切换新浪: {stock_code}")
+
+    # 3. 易方达 AI Skills
+    log("WARNING", f"腾讯失败，切换易方达AI: {stock_code}")
+    price = get_price_efunds(stock_code)
+    if price:
+        save_cache_price(stock_code, price)
+        return price
+
+    # 4. 新浪财经
+    log("WARNING", f"易方达AI失败，切换新浪: {stock_code}")
     price = get_price_sina(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
+
+    # 5. Baostock 前日收盘价（兜底）
     log("WARNING", f"新浪失败，使用Baostock前日收盘价: {stock_code}")
     price = get_price_baostock_cache(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
+
     log("ERROR", f"所有价格源均失败: {stock_code}")
     return None
 
@@ -313,6 +361,7 @@ def calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct, take_pro
     buy_price = current_price * buy_bias
     stop_loss = buy_price * (1 - stop_loss_pct)
     strategy_take_profit = buy_price * (1 + stop_loss_pct * take_profit_rr)
+
     high_52w = get_52w_high(stock_code)
     final_take_profit = strategy_take_profit
     if high_52w and high_52w > 0:
@@ -320,6 +369,7 @@ def calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct, take_pro
         if strategy_take_profit > cap:
             final_take_profit = cap
             log("DEBUG", f"{stock_code} 止盈价从 {strategy_take_profit:.2f} 限制为 {final_take_profit:.2f} (52周高点{high_52w:.2f})")
+
     return {
         "buy_price": round(buy_price, 2),
         "stop_loss": round(stop_loss, 2),
@@ -409,11 +459,9 @@ def generate_markdown_report(candidates, pricing_results, market_state):
 
 
 # ============================================================
-# 邮件发送函数
+# 邮件发送（含策略背景）
 # ============================================================
 def send_pricing_email(content_md, report_lines):
-    """发送定价报告邮件，并包含策略背景说明"""
-    # 读取策略上下文
     strategy_info = load_strategy_context()
     if not strategy_info:
         strategy_info = {
@@ -434,7 +482,6 @@ def send_pricing_email(content_md, report_lines):
 
     subject = f'📊 次日买卖价格参考 - {datetime.now().strftime("%Y-%m-%d")}'
 
-    # 构建邮件正文：策略背景 + 定价表格
     body_lines = []
     body_lines.append("📌 策略背景")
     body_lines.append(f"当前策略：{strategy_info.get('strategy_type', '未知')} ({strategy_info.get('strategy', '')})")
@@ -444,11 +491,12 @@ def send_pricing_email(content_md, report_lines):
     body_lines.append("")
     body_lines.append("📋 定价参考（基于上述策略逻辑筛选）")
     body_lines.append("")
-    # 添加表格头
+
+    # 构建定价表格
     body_lines.append("股票代码 | 名称 | 类型 | 当前价 | 买入价 | 止损价 | 止盈价")
     body_lines.append("---------|------|------|--------|--------|--------|--------")
     for line in report_lines:
-        if line.startswith("|") and "股票" not in line:  # 过滤掉表格头
+        if line.startswith("|") and "股票" not in line:
             parts = line.split("|")
             if len(parts) >= 7:
                 code_name = parts[1].strip()
@@ -485,9 +533,9 @@ def main():
     parser.add_argument('--send-email', action='store_true', help='发送定价报告邮件')
     args = parser.parse_args()
 
-    log("INFO", "="*60)
-    log("INFO", "📊 买卖价格计算器 v3.2")
-    log("INFO", "="*60)
+    log("INFO", "=" * 60)
+    log("INFO", "📊 买卖价格计算器 v3.3")
+    log("INFO", "=" * 60)
 
     if os.environ.get("DEBUG_MODE") == "true":
         set_log_level("DEBUG")
@@ -539,7 +587,7 @@ def main():
     with open(OUTPUT_FILE, "w", encoding='utf-8') as f:
         f.write(report)
 
-    # 生成纯文本版本用于邮件
+    # 纯文本版本用于邮件
     plain_lines = []
     plain_lines.append("📊 次日买卖价格参考")
     plain_lines.append(f"大盘策略: {market_state.get('strategy', 'rsi_reversion_v1')}")
@@ -555,9 +603,9 @@ def main():
                            f"{pricing['current_price']:.2f} | {pricing['buy_price']:.2f} | "
                            f"{pricing['stop_loss']:.2f} | {pricing['final_take_profit']:.2f}")
 
-    log("INFO", "="*60)
+    log("INFO", "=" * 60)
     log("INFO", f"✅ 定价报告已生成: {OUTPUT_FILE}")
-    log("INFO", "="*60)
+    log("INFO", "=" * 60)
 
     if args.send_email:
         send_pricing_email(report, plain_lines)

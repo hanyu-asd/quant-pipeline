@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.6 - 增加策略上下文文件生成
+v6.7 - 集成 TickFlow + 易方达 AI Skills 作为指数数据源
 """
 import requests
 import json
@@ -15,12 +15,14 @@ from logger import log
 STATE_FILE = "trend_state.json"
 CACHE_DIR = "cache"
 
+
 # ============================================================
 # 缓存工具函数
 # ============================================================
 def ensure_cache_dir():
     if not os.path.exists(CACHE_DIR):
         os.makedirs(CACHE_DIR)
+
 
 def save_index_cache(symbol, closes):
     ensure_cache_dir()
@@ -34,6 +36,7 @@ def save_index_cache(symbol, closes):
     except Exception as e:
         log("WARNING", f"保存指数缓存失败 {symbol}: {e}")
 
+
 def load_index_cache(symbol):
     cache_file = f"{CACHE_DIR}/index_{symbol}.json"
     if not os.path.exists(cache_file):
@@ -46,12 +49,16 @@ def load_index_cache(symbol):
         log("WARNING", f"读取指数缓存失败 {symbol}: {e}")
         return None, None
 
+
 def is_cache_valid(cache_date):
     if not cache_date:
         return False
     return cache_date == datetime.now().strftime("%Y-%m-%d")
 
-# ---- 数据源获取（4层） ----
+
+# ============================================================
+# 指数数据获取（多源）
+# ============================================================
 def get_index_history_baostock(symbol, days=100):
     try:
         import baostock as bs
@@ -73,8 +80,49 @@ def get_index_history_baostock(symbol, days=100):
             return None
         return [float(x) for x in data['close'].tolist()]
     except Exception as e:
-        log("WARNING", f"[get_index_history_baostock] 失败: {e}")
+        log("WARNING", f"[Baostock] 获取指数失败: {e}")
         return None
+
+
+def get_index_history_tickflow(symbol, days=100):
+    """使用 TickFlow 获取指数日线数据"""
+    try:
+        import tickflow as tf
+        # symbol 格式为 'sh000001' 或 'sz399006'
+        code = symbol.replace('sh', '').replace('sz', '')
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
+        df = tf.get_daily(symbol=code, market='cn',
+                          start_date=start_date, end_date=end_date)
+        if df is None or len(df) < 10:
+            return None
+        return df['close'].values.tolist()
+    except Exception as e:
+        log("WARNING", f"[TickFlow] 获取指数 {symbol} 失败: {e}")
+        return None
+
+
+def get_index_history_efunds(symbol, days=100):
+    """使用易方达 AI Skills 获取指数行情（需 API Key）"""
+    api_key = os.environ.get('EFUNDS_API_KEY')
+    if not api_key:
+        return None
+    try:
+        code = symbol.replace('sh', '').replace('sz', '')
+        url = f"https://api.efunds.com.cn/aiskills/index/quote?code={code}&period=day&count={days}"
+        headers = {'Authorization': f'Bearer {api_key}'}
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            # 根据实际返回格式解析（假设返回 closes 列表）
+            closes = data.get('closes') or data.get('data', {}).get('closes')
+            if closes and len(closes) >= 10:
+                return [float(x) for x in closes]
+        return None
+    except Exception as e:
+        log("WARNING", f"[易方达AI] 获取指数 {symbol} 失败: {e}")
+        return None
+
 
 def get_index_history_sina(symbol, days=100):
     try:
@@ -88,8 +136,9 @@ def get_index_history_sina(symbol, days=100):
             return None
         return [float(item['close']) for item in data]
     except Exception as e:
-        log("WARNING", f"[get_index_history_sina] 失败: {e}")
+        log("WARNING", f"[新浪] 获取指数失败: {e}")
         return None
+
 
 def get_index_history_tencent(symbol, days=100):
     try:
@@ -108,79 +157,109 @@ def get_index_history_tencent(symbol, days=100):
         kline_data = data_json['data'][symbol].get('day', [])
         if not kline_data:
             return None
-        return [float(item[2]) for item in kline_data if len(item)>2]
+        return [float(item[2]) for item in kline_data if len(item) > 2]
     except Exception as e:
-        log("WARNING", f"[get_index_history_tencent] 失败: {e}")
+        log("WARNING", f"[腾讯] 获取指数失败: {e}")
         return None
+
 
 def get_index_history_akshare(symbol, days=100):
     try:
         import akshare as ak
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=start_date, end_date=end_date, adjust="")
+        code = symbol.replace('sh', '').replace('sz', '')
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="")
         if df.empty or len(df) < 10:
             return None
         return df['收盘'].values.tolist()
     except Exception as e:
-        log("WARNING", f"[get_index_history_akshare] 失败: {e}")
+        log("WARNING", f"[AkShare] 获取指数失败: {e}")
         return None
+
 
 def get_index_data(symbol, days=100):
     if symbol in ["sh000001", "000001"]:
-        code_map = {"baostock": "sh.000001", "sina": "sh000001", "tencent": "sh000001", "akshare": "000001"}
         name = "上证指数"
     elif symbol in ["sz399006", "399006"]:
-        code_map = {"baostock": "sz.399006", "sina": "sz399006", "tencent": "sz399006", "akshare": "399006"}
         name = "创业板指"
     else:
         return None
+
     log("INFO", f"正在获取 {name} 数据...")
-    closes = get_index_history_baostock(code_map["baostock"], days)
+
+    # 1. Baostock
+    closes = get_index_history_baostock(symbol, days)
     if closes:
         log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
         return closes
-    log("WARNING", f"  Baostock失败，切换新浪财经")
-    closes = get_index_history_sina(code_map["sina"], days)
+
+    # 2. TickFlow
+    log("WARNING", f"  Baostock失败，切换TickFlow")
+    closes = get_index_history_tickflow(symbol, days)
+    if closes:
+        log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")
+        return closes
+
+    # 3. 易方达 AI Skills
+    log("WARNING", f"  TickFlow失败，切换易方达AI")
+    closes = get_index_history_efunds(symbol, days)
+    if closes:
+        log("INFO", f"  ✅ 易方达AI成功: {len(closes)}个交易日")
+        return closes
+
+    # 4. 新浪
+    log("WARNING", f"  易方达AI失败，切换新浪财经")
+    closes = get_index_history_sina(symbol, days)
     if closes:
         log("INFO", f"  ✅ 新浪财经成功: {len(closes)}个交易日")
         return closes
+
+    # 5. 腾讯
     log("WARNING", f"  新浪失败，切换腾讯财经")
-    closes = get_index_history_tencent(code_map["tencent"], days)
+    closes = get_index_history_tencent(symbol, days)
     if closes:
         log("INFO", f"  ✅ 腾讯财经成功: {len(closes)}个交易日")
         return closes
+
+    # 6. AkShare
     log("WARNING", f"  腾讯失败，切换AkShare")
-    closes = get_index_history_akshare(code_map["akshare"], days)
+    closes = get_index_history_akshare(symbol, days)
     if closes:
         log("INFO", f"  ✅ AkShare成功: {len(closes)}个交易日")
         return closes
+
     log("ERROR", f"  所有数据源均失败")
     return None
 
+
+# ============================================================
+# 趋势判断与策略决策
+# ============================================================
 def calculate_ma(closes, period):
     if len(closes) < period:
         return closes[-1]
     return sum(closes[-period:]) / period
 
+
 def detect_trend_and_state(sh_closes, cy_closes, mainline_result):
     if not sh_closes or len(sh_closes) < 60:
         return "震荡", "normal", "震荡", 0, 0, 0, 0, 0
-    
+
     ma20 = calculate_ma(sh_closes, 20)
     ma60 = calculate_ma(sh_closes, 60)
     current = sh_closes[-1]
-    momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100 if len(sh_closes)>=20 else 0
-    
+    momentum_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100 if len(sh_closes) >= 20 else 0
+
     if ma20 > ma60:
         trend = "上升趋势"
     elif ma20 < ma60:
         trend = "下降趋势"
     else:
         trend = "震荡"
-    
+
     if len(sh_closes) >= 20:
-        ret_20 = (sh_closes[-1]/sh_closes[-20]-1)*100
+        ret_20 = (sh_closes[-1] / sh_closes[-20] - 1) * 100
         if ret_20 < -7:
             market_state = "extreme"
         elif ret_20 < -4:
@@ -189,13 +268,13 @@ def detect_trend_and_state(sh_closes, cy_closes, mainline_result):
             market_state = "normal"
     else:
         market_state = "normal"
-    
+
     tech_premium = 0
-    if cy_closes and len(cy_closes)>=20 and len(sh_closes)>=20:
-        ret_cy = (cy_closes[-1]/cy_closes[-20]-1)*100
-        ret_sh = (sh_closes[-1]/sh_closes[-20]-1)*100
+    if cy_closes and len(cy_closes) >= 20 and len(sh_closes) >= 20:
+        ret_cy = (cy_closes[-1] / cy_closes[-20] - 1) * 100
+        ret_sh = (sh_closes[-1] / sh_closes[-20] - 1) * 100
         tech_premium = round(ret_cy - ret_sh, 2)
-    
+
     pattern = "震荡"
     if trend == "上升趋势":
         pattern = "普涨"
@@ -207,15 +286,16 @@ def detect_trend_and_state(sh_closes, cy_closes, mainline_result):
     else:
         if mainline_result.get("confidence", 0) > 50:
             pattern = "结构性行情"
-    
+
     return trend, market_state, pattern, tech_premium, ma20, ma60, momentum_20, current
+
 
 def get_position_advice(trend, pattern, mainline_confidence, market_state):
     if market_state == "extreme":
         return 0, 0, 100, "极端模式，建议空仓观望"
     if market_state == "high_risk":
         return 30, 30, 40, "高风险模式，建议轻仓防守"
-    
+
     if pattern == "普涨":
         return 70, 20, 10, "普涨行情，积极配置"
     elif pattern == "结构性行情":
@@ -229,6 +309,7 @@ def get_position_advice(trend, pattern, mainline_confidence, market_state):
         return 20, 30, 50, "普跌行情，防御为主"
     else:
         return 40, 30, 30, "震荡行情，均衡配置"
+
 
 def generate_default_market_state():
     return {
@@ -253,26 +334,27 @@ def generate_default_market_state():
         "tech_premium": 0
     }
 
+
 def main():
-    log("INFO", "="*70)
-    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.6）")
-    log("INFO", "="*70)
-    
+    log("INFO", "=" * 70)
+    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.7）")
+    log("INFO", "=" * 70)
+
+    # 获取上证指数数据（优先实时，缓存仅作兜底）
     sh_closes = get_index_data("sh000001", 100)
     sh_cache_date, sh_cache_closes = load_index_cache("sh000001")
-    
     use_realtime = sh_closes is not None
-    
+
     if use_realtime:
         log("INFO", f"✅ 使用实时数据，交易日数: {len(sh_closes)}")
         save_index_cache("sh000001", sh_closes)
     else:
         log("WARNING", "❌ 上证指数实时数据获取失败")
         if is_cache_valid(sh_cache_date) and sh_cache_closes:
-            log("WARNING", "⚠️ 使用今日缓存数据（仅用于防止崩溃，策略决策采用默认防守策略）")
+            log("WARNING", "⚠️ 使用今日缓存数据（仅作容错）")
             sh_closes = sh_cache_closes
         elif sh_cache_closes:
-            log("WARNING", "⚠️ 使用过期缓存数据（仅用于防止崩溃，策略决策采用默认防守策略）")
+            log("WARNING", "⚠️ 使用过期缓存数据（仅作容错）")
             sh_closes = sh_cache_closes
         else:
             log("ERROR", "❌ 无任何可用数据，使用默认策略")
@@ -281,7 +363,6 @@ def main():
                 json.dump(default_state, f, indent=2, ensure_ascii=False)
             with open("selected_strategy.txt", "w") as f:
                 f.write("rsi_reversion_v1")
-            # 生成默认策略上下文
             default_context = {
                 "strategy": "rsi_reversion_v1",
                 "strategy_type": "均值回归/超卖反弹",
@@ -293,13 +374,19 @@ def main():
                 json.dump(default_context, f, indent=2, ensure_ascii=False)
             log("INFO", "默认市场状态和策略上下文已保存")
             return
-    
-    if not cy_closes:
+
+    # 获取创业板指数据（若无则用上证替代）
+    cy_closes = get_index_data("sz399006", 100)
+    if cy_closes:
+        log("INFO", f"✅ 创业板指数据获取成功，交易日数: {len(cy_closes)}")
+        save_index_cache("sz399006", cy_closes)
+    else:
+        log("WARNING", "创业板指数据获取失败，将使用上证指数替代")
         cy_closes = sh_closes
-    
-    is_data_from_cache = not use_realtime
-    if is_data_from_cache:
-        log("WARNING", "⚠️ 数据来源为缓存（过期数据），不进行趋势判断，采用默认防守策略")
+
+    # 如果数据来自缓存，强制使用默认防守策略（不计算趋势）
+    if not use_realtime:
+        log("WARNING", "⚠️ 数据来源为缓存，不进行趋势判断，采用默认防守策略")
         default_state = generate_default_market_state()
         default_state["current_price"] = sh_closes[-1] if sh_closes else 0
         default_state["date"] = datetime.now().strftime("%Y-%m-%d")
@@ -307,7 +394,6 @@ def main():
             json.dump(default_state, f, indent=2, ensure_ascii=False)
         with open("selected_strategy.txt", "w") as f:
             f.write("rsi_reversion_v1")
-        # 生成策略上下文
         context = {
             "strategy": "rsi_reversion_v1",
             "strategy_type": "均值回归/超卖反弹",
@@ -319,17 +405,20 @@ def main():
             json.dump(context, f, indent=2, ensure_ascii=False)
         log("INFO", "✅ 默认防守策略已保存")
         return
-    
+
+    # 主线识别
     log("INFO", "正在识别市场主线...")
     mainline_result = identify_mainline()
-    
+
+    # 趋势判断
     trend, market_state, pattern, tech_premium, ma20, ma60, momentum_20, current = detect_trend_and_state(
         sh_closes, cy_closes, mainline_result
     )
-    
+
+    # 策略决策
     strategy = None
     reason = ""
-    
+
     if market_state in ("extreme", "high_risk"):
         strategy = "rsi_reversion_v1"
         reason = f"{market_state}，强制防守策略"
@@ -345,11 +434,11 @@ def main():
     else:
         strategy = "rsi_reversion_v1"
         reason = "下降趋势（无主线），均值回归防守"
-    
+
     main_pct, alt_pct, def_pct, pos_reason = get_position_advice(
         trend, pattern, mainline_result.get("confidence", 0), market_state
     )
-    
+
     log("INFO", f"📊 上证指数: {current:.2f}, MA20: {ma20:.2f}, MA60: {ma60:.2f}")
     log("INFO", f"📊 近20日动量: {momentum_20:.2f}%, 科技溢价: {tech_premium:.2f}%")
     log("INFO", f"📊 趋势: {trend}, 市场状态: {market_state}, pattern: {pattern}")
@@ -360,11 +449,11 @@ def main():
     log("INFO", f"🎯 选定策略: {strategy}")
     log("INFO", f"📝 原因: {reason}")
     log("INFO", f"💰 仓位: 主{main_pct}% / 备{alt_pct}% / 防{def_pct}% - {pos_reason}")
-    log("INFO", "="*70)
-    
+    log("INFO", "=" * 70)
+
     with open("selected_strategy.txt", "w") as f:
         f.write(strategy)
-    
+
     state = {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "trend": trend,
@@ -388,8 +477,8 @@ def main():
     }
     with open("market_state.json", "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
-    
-    # 生成策略上下文文件
+
+    # 生成策略上下文
     strategy_context = {
         "strategy": strategy,
         "strategy_type": {
@@ -423,8 +512,9 @@ def main():
     }
     with open("strategy_context.json", "w", encoding="utf-8") as f:
         json.dump(strategy_context, f, indent=2, ensure_ascii=False)
-    
+
     log("INFO", "✅ 结果已保存")
+
 
 if __name__ == "__main__":
     main()
