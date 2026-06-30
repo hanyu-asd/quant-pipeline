@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.3 - 适配 identify_mainline 结构化返回值
+v6.5 - 缓存仅用于容错，过期数据不参与策略决策
 """
 import requests
 import json
@@ -13,6 +13,44 @@ from identify_mainline import identify_mainline
 from logger import log
 
 STATE_FILE = "trend_state.json"
+CACHE_DIR = "cache"
+
+# ============================================================
+# 缓存工具函数
+# ============================================================
+def ensure_cache_dir():
+    if not os.path.exists(CACHE_DIR):
+        os.makedirs(CACHE_DIR)
+
+def save_index_cache(symbol, closes):
+    ensure_cache_dir()
+    cache_file = f"{CACHE_DIR}/index_{symbol}.json"
+    try:
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "closes": closes
+            }, f)
+    except Exception as e:
+        log("WARNING", f"保存指数缓存失败 {symbol}: {e}")
+
+def load_index_cache(symbol):
+    cache_file = f"{CACHE_DIR}/index_{symbol}.json"
+    if not os.path.exists(cache_file):
+        return None, None
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return data.get("date"), data.get("closes")
+    except Exception as e:
+        log("WARNING", f"读取指数缓存失败 {symbol}: {e}")
+        return None, None
+
+def is_cache_valid(cache_date):
+    """检查缓存是否当天"""
+    if not cache_date:
+        return False
+    return cache_date == datetime.now().strftime("%Y-%m-%d")
 
 # ---- 数据源获取（4层） ----
 def get_index_history_baostock(symbol, days=100):
@@ -171,7 +209,6 @@ def detect_trend_and_state(sh_closes, cy_closes, mainline_result):
         if mainline_result.get("confidence", 0) > 50:
             pattern = "结构性行情"
     
-    log("DEBUG", f"趋势: {trend}, 市场状态: {market_state}, pattern: {pattern}, 科技溢价: {tech_premium}")
     return trend, market_state, pattern, tech_premium, ma20, ma60, momentum_20, current
 
 def get_position_advice(trend, pattern, mainline_confidence, market_state):
@@ -194,20 +231,91 @@ def get_position_advice(trend, pattern, mainline_confidence, market_state):
     else:
         return 40, 30, 30, "震荡行情，均衡配置"
 
+def generate_default_market_state():
+    """生成默认市场状态（当所有数据都无法获取时）"""
+    return {
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "trend": "下降趋势",
+        "market_state": "normal",
+        "pattern": "普跌",
+        "strategy": "rsi_reversion_v1",
+        "reason": "数据获取失败，使用默认防守策略",
+        "main_group": None,
+        "main_confidence": 0,
+        "main_strength": 0,
+        "main_strategy": "rsi_reversion_v1",
+        "position_main": 20,
+        "position_alt": 30,
+        "position_def": 50,
+        "position_reason": "数据缺失，防御为主",
+        "current_price": 0,
+        "ma20": 0,
+        "ma60": 0,
+        "momentum_20": 0,
+        "tech_premium": 0
+    }
+
 def main():
     log("INFO", "="*70)
-    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.3）")
+    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.5）")
     log("INFO", "="*70)
     
+    # 获取上证指数数据
     sh_closes = get_index_data("sh000001", 100)
-    if not sh_closes:
-        log("ERROR", "无法获取指数数据，使用默认策略 rsi_reversion_v1")
+    sh_cache_date, sh_cache_closes = load_index_cache("sh000001")
+    
+    # 判断是否使用实时数据
+    use_realtime = sh_closes is not None
+    
+    if use_realtime:
+        log("INFO", f"✅ 使用实时数据，交易日数: {len(sh_closes)}")
+        save_index_cache("sh000001", sh_closes)
+    else:
+        log("WARNING", "❌ 上证指数实时数据获取失败")
+        # 检查是否有实时可用的缓存（当天）
+        if is_cache_valid(sh_cache_date) and sh_cache_closes:
+            log("WARNING", "⚠️ 使用今日缓存数据（仅用于防止崩溃，策略决策采用默认防守策略）")
+            sh_closes = sh_cache_closes
+        elif sh_cache_closes:
+            log("WARNING", "⚠️ 使用过期缓存数据（仅用于防止崩溃，策略决策采用默认防守策略）")
+            sh_closes = sh_cache_closes
+        else:
+            log("ERROR", "❌ 无任何可用数据，使用默认策略")
+            default_state = generate_default_market_state()
+            with open("market_state.json", "w", encoding="utf-8") as f:
+                json.dump(default_state, f, indent=2, ensure_ascii=False)
+            with open("selected_strategy.txt", "w") as f:
+                f.write("rsi_reversion_v1")
+            log("INFO", "默认市场状态已保存")
+            return
+    
+    # 获取创业板指数据
+    cy_closes = get_index_data("sz399006", 100)
+    if cy_closes:
+        log("INFO", f"✅ 创业板指数据获取成功，交易日数: {len(cy_closes)}")
+        save_index_cache("sz399006", cy_closes)
+    else:
+        log("WARNING", "创业板指数据获取失败，将使用上证指数替代")
+        cy_closes = sh_closes
+    
+    # ⚠️ 关键判断：如果使用的是缓存数据（非实时），直接采用默认防守策略
+    is_data_from_cache = not use_realtime
+    if is_data_from_cache:
+        log("WARNING", "⚠️ 数据来源为缓存（过期数据），不进行趋势判断，采用默认防守策略")
+        default_state = generate_default_market_state()
+        # 但保留一些基本信息
+        default_state["current_price"] = sh_closes[-1] if sh_closes else 0
+        default_state["date"] = datetime.now().strftime("%Y-%m-%d")
+        with open("market_state.json", "w", encoding="utf-8") as f:
+            json.dump(default_state, f, indent=2, ensure_ascii=False)
         with open("selected_strategy.txt", "w") as f:
             f.write("rsi_reversion_v1")
+        log("INFO", "✅ 默认防守策略已保存")
         return
-    cy_closes = get_index_data("sz399006", 100)
-    if not cy_closes:
-        cy_closes = sh_closes
+    
+    # ============================================================
+    # 只有实时数据才执行完整的趋势判断和策略选择
+    # ============================================================
     
     # 主线识别（结构化）
     log("INFO", "正在识别市场主线...")
@@ -218,7 +326,7 @@ def main():
         sh_closes, cy_closes, mainline_result
     )
     
-    # 策略决策（通用化优先级）
+    # 策略决策
     strategy = None
     reason = ""
     
