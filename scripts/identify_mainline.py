@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 动态主线识别模块
-v6.7 - 修复 Baostock 会话调用，优化 TickFlow
+v6.8 - 独立 Baostock 登录，增强 TickFlow 容错
 """
 import json
 import sys
@@ -57,25 +57,58 @@ init_etf_status()
 
 
 # ============================================================
+# 数据源：Baostock（独立登录）
+# ============================================================
+def get_etf_data_baostock(code, days=80):
+    """独立登录查询 Baostock ETF 数据"""
+    try:
+        import baostock as bs
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
+        prefix = "sh" if code.startswith('6') else "sz"
+        lg = bs.login()
+        if lg.error_code != '0':
+            return None
+        rs = bs.query_history_k_data_plus(
+            f"{prefix}.{code}", "date,close",
+            start_date=start_date, end_date=end_date,
+            frequency="d", adjustflag="3"
+        )
+        bs.logout()
+        if rs.error_code != '0':
+            return None
+        data = rs.get_data()
+        if data is None or len(data) < 60:
+            return None
+        return [float(x) for x in data['close'].tolist()]
+    except Exception as e:
+        log("WARNING", f"[Baostock] 获取 {code} 失败: {e}")
+        return None
+
+
+# ============================================================
 # 数据源：TickFlow（ETF）
 # ============================================================
 def get_etf_data_tickflow(code, days=80):
     try:
         from tickflow import TickFlow
         tf = TickFlow.free()
-        market = 'SH' if code.startswith('6') else 'SZ'
-        full_symbol = f"{code}.{market}"
-        df = tf.klines.get(
-            symbol=full_symbol,
-            period="1d",
-            count=days,
-            as_dataframe=True
-        )
-        if df is not None and len(df) >= 60:
-            df = df.sort_values('trade_date')
-            return df['close'].values.tolist()
-        else:
-            log("DEBUG", f"TickFlow 返回数据不足: {len(df) if df is not None else 0}")
+        # 尝试两种格式
+        formats = [f"{code}.SH", f"{code}.SZ", f"sh{code}", f"sz{code}"]
+        for sym in formats:
+            try:
+                df = tf.klines.get(
+                    symbol=sym,
+                    period="1d",
+                    count=days,
+                    as_dataframe=True
+                )
+                if df is not None and len(df) >= 60:
+                    df = df.sort_values('trade_date')
+                    log("DEBUG", f"TickFlow 成功格式: {sym}")
+                    return df['close'].values.tolist()
+            except:
+                continue
         return None
     except Exception as e:
         log("WARNING", f"[TickFlow] 获取 {code} 失败: {e}")
@@ -146,52 +179,25 @@ def get_benchmark_data(days=80):
 
 
 # ============================================================
-# 修复：Baostock ETF 获取（不再使用 connection 参数）
+# 主获取逻辑（多源备份）
 # ============================================================
-def fetch_etf_from_baostock(code, days):
-    """直接使用已登录的全局会话获取数据（无 connection 参数）"""
-    try:
-        import baostock as bs
-        prefix = "sh" if code.startswith('6') else "sz"
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        rs = bs.query_history_k_data_plus(
-            f"{prefix}.{code}", "date,close",
-            start_date=start_date, end_date=end_date,
-            frequency="d", adjustflag="3"
-        )
-        if rs.error_code != '0':
-            return None
-        data = rs.get_data()
-        if data is None or len(data) < 60:
-            return None
-        return [float(x) for x in data['close'].tolist()]
-    except Exception as e:
-        log("WARNING", f"[Baostock] 获取 {code} 失败: {e}")
-        return None
-
-
-def get_etf_data_with_fallback(code, days, bs_logged_in=False):
+def get_etf_data_with_fallback(code, days=80):
     """
-    获取ETF数据：
-    1. 如果 Baostock 已登录，直接使用
-    2. 否则尝试 TickFlow → Tushare → AkShare
+    按顺序尝试多个数据源：Baostock → TickFlow → Tushare → AkShare
     """
-    # 1. Baostock（优先，前提是已登录）
-    if bs_logged_in:
-        closes = fetch_etf_from_baostock(code, days)
-        if closes:
-            log("DEBUG", f"  ✅ Baostock成功: {code}")
-            ETF_STATUS[code]["fail_count"] = 0
-            ETF_STATUS[code]["status"] = "active"
-            return closes
-        else:
-            ETF_STATUS[code]["fail_count"] += 1
-            log("WARNING", f"  Baostock获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
+    # 1. Baostock
+    log("INFO", f"获取ETF {code} 数据...")
+    closes = get_etf_data_baostock(code, days)
+    if closes:
+        log("INFO", f"  ✅ Baostock成功: {len(closes)}个交易日")
+        ETF_STATUS[code]["fail_count"] = 0
+        ETF_STATUS[code]["status"] = "active"
+        return closes
     else:
-        log("WARNING", "  Baostock未登录，跳过主源")
+        ETF_STATUS[code]["fail_count"] += 1
+        log("WARNING", f"  Baostock获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
 
-    # 2. 尝试 TickFlow
+    # 2. TickFlow
     log("WARNING", f"  尝试TickFlow: {code}")
     closes = get_etf_data_tickflow(code, days)
     if closes:
@@ -262,19 +268,11 @@ def identify_mainline():
             "ranking": 0
         }
 
-    # 登录 Baostock（只登录一次，后续直接使用全局会话）
-    import baostock as bs
-    log("INFO", "登录Baostock获取ETF数据...")
-    lg = bs.login()
-    bs_logged_in = (lg.error_code == '0')
-    if not bs_logged_in:
-        log("WARNING", f"Baostock登录失败: {lg.error_msg}，将仅使用TickFlow/Tushare/AkShare")
-
     scores = []
     for code, info in ETF_MAP.items():
         if ETF_STATUS.get(code, {}).get("status") == "disabled":
             continue
-        etf = get_etf_data_with_fallback(code, 80, bs_logged_in)
+        etf = get_etf_data_with_fallback(code, 80)
         if not etf:
             continue
         rs_5, rs_20, rs_60 = calculate_relative_strength(etf, benchmark)
@@ -285,12 +283,7 @@ def identify_mainline():
             "group": info["group"],
             "combined": combined
         })
-        time.sleep(0.3)  # 频率控制
-
-    # 登出 Baostock（如果登录成功）
-    if bs_logged_in:
-        bs.logout()
-        log("INFO", "Baostock登出")
+        time.sleep(0.5)  # 增加延迟，降低请求频率
 
     if not scores:
         log("WARNING", "无ETF数据，使用默认策略")
@@ -365,7 +358,7 @@ def identify_mainline():
 
     group_avg_all = {}
     for group in group_counts.keys():
-        gs = [s["combined"] for s in scores if s["group"] == g]
+        gs = [s["combined"] for s in scores if s["group"] == group]
         group_avg_all[group] = sum(gs) / len(gs) if gs else 0
     sorted_groups = sorted(group_avg_all.items(), key=lambda x: x[1], reverse=True)
     ranking = [g[0] for g in sorted_groups].index(main_group) + 1
