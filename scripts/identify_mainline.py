@@ -60,7 +60,7 @@ STRATEGY_MAP = {
 }
 DEFAULT_STRATEGY = "balanced_alpha"
 
-# ETF 状态跟踪（简化，仍保留）
+# ETF 状态跟踪（简化）
 ETF_STATUS = {}
 
 
@@ -73,7 +73,7 @@ init_etf_status()
 
 
 # ============================================================
-# 数据源函数（备选：Tushare / AkShare）
+# 备选数据源：Tushare / AkShare
 # ============================================================
 def get_etf_data_tushare(code, days=80):
     try:
@@ -112,7 +112,7 @@ def get_etf_data_akshare(code, days=80):
 
 def get_benchmark_data(days=80):
     """
-    获取沪深300基准数据（独立登录，因为基准只需要一次）
+    获取沪深300基准数据（独立登录）
     """
     try:
         import baostock as bs
@@ -143,13 +143,16 @@ def _fetch_etf_from_baostock_with_session(code, days, bs_session):
     使用已存在的 bs 会话获取ETF数据，避免重复登录
     """
     try:
+        import baostock as bs
         prefix = "sh" if code.startswith('6') else "sz"
         end_date = datetime.now().strftime("%Y-%m-%d")
         start_date = (datetime.now() - timedelta(days=days+30)).strftime("%Y-%m-%d")
-        rs = bs_session.query_history_k_data_plus(
+        # 关键修复：调用模块函数，传入 connection 参数
+        rs = bs.query_history_k_data_plus(
             f"{prefix}.{code}", "date,close",
             start_date=start_date, end_date=end_date,
-            frequency="d", adjustflag="3"
+            frequency="d", adjustflag="3",
+            connection=bs_session   # 传入会话对象
         )
         if rs.error_code != '0':
             return None
@@ -178,11 +181,9 @@ def get_etf_data_with_fallback(code, days, bs_session=None):
             ETF_STATUS[code]["fail_count"] += 1
             log("WARNING", f"  Baostock会话获取 {code} 失败 (连续{ETF_STATUS[code]['fail_count']}次)")
     else:
-        # 如果没有会话，尝试旧方式（保留兼容）
         log("WARNING", f"  无Baostock会话，跳过主源")
 
-    # 2. 尝试备选数据源
-    # 连续失败 >= 3 次时尝试备选ETF（如果有）
+    # 2. 尝试备选ETF（如果连续失败>=3且存在备选）
     if ETF_STATUS[code]["fail_count"] >= 3 and ETF_MAP[code].get("backup"):
         backup_code = ETF_MAP[code]["backup"]
         log("INFO", f"  切换到备选ETF {backup_code}")
