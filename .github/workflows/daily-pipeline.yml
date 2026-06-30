@@ -112,25 +112,21 @@ jobs:
         env:
           # === LLM 配置（魔塔社区 API） ===
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          # LiteLLM 官方变量名（必须）
           OPENAI_API_BASE: ${{ secrets.OPENAI_BASE_URL }}
-          # 兼容变量（保留）
           OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
-          # 魔塔模型 ID
           OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
-          # ⚠️ 关键修复：加 openai/ 前缀，强制 LiteLLM 走 OpenAI 兼容模式
           LITELLM_MODEL: openai/${{ secrets.OPENAI_MODEL }}
           # === 其他配置 ===
           STOCK_LIST: ${{ env.STOCK_LIST }}
-          EMAIL_ENABLED: false
-          NOTIFICATION_ENABLED: false
-          SEND_EMAIL: false
+          # 启用 daily_stock_analysis 自身的邮件发送
+          EMAIL_ENABLED: true
+          SEND_EMAIL: true
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
         run: |
           cd daily_stock_analysis
-          python main.py --no-email 2>/dev/null || python main.py
+          python main.py
 
       - name: 计算候选股买卖价格
         if: github.event.inputs.dry_run != 'true'
@@ -138,100 +134,15 @@ jobs:
           cd ${{ github.workspace }}
           python pricing_calculator.py
 
-      - name: 合并邮件发送
+      - name: 发送定价报告邮件
         if: github.event.inputs.dry_run != 'true'
         env:
           EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECEIVERS: ${{ secrets.EMAIL_RECEIVERS }}
         run: |
-          cat > send_combined_email.py << 'EOF'
-          import smtplib
-          import os
-          import glob
-          import json
-          from email.mime.text import MIMEText
-          from datetime import datetime
-          
-          sender = os.environ.get('EMAIL_SENDER')
-          password = os.environ.get('EMAIL_PASSWORD')
-          receivers_str = os.environ.get('EMAIL_RECEIVERS', '')
-          receivers = [r.strip() for r in receivers_str.split(',') if r.strip()]
-          
-          if not sender or not password or not receivers:
-              print("邮件配置不完整，跳过发送")
-              exit(0)
-          
-          market_content = ""
-          market_files = glob.glob("daily_stock_analysis/reports/market_review_*.md")
-          for f in sorted(market_files, reverse=True):
-              with open(f, 'r', encoding='utf-8') as file:
-                  market_content = file.read()
-                  break
-          
-          stock_content = ""
-          stock_files = glob.glob("daily_stock_analysis/reports/*_analysis_*.md")
-          if not stock_files:
-              stock_files = glob.glob("daily_stock_analysis/reports/stock_*.md")
-          for f in sorted(stock_files, reverse=True):
-              with open(f, 'r', encoding='utf-8') as file:
-                  stock_content = file.read()
-                  break
-          
-          pricing_content = ""
-          try:
-              with open('pricing.txt', 'r', encoding='utf-8') as f:
-                  pricing_content = f.read()
-          except:
-              pass
-          
-          market_state = {}
-          try:
-              with open('market_state.json', 'r', encoding='utf-8') as f:
-                  market_state = json.load(f)
-          except:
-              pass
-          
-          parts = []
-          if market_content:
-              parts.append("📊 大盘复盘报告\n" + "=" * 40 + "\n" + market_content)
-          
-          if market_state:
-              parts.append("📊 市场状态\n" + "=" * 40 + 
-                  f"\n趋势: {market_state.get('trend_desc', '未知')}" +
-                  f"\n策略: {market_state.get('strategy', '未知')}" +
-                  f"\n主线: {market_state.get('main_group', '无')}" +
-                  f"\n市场状态: {market_state.get('market_state', '正常')}" +
-                  f"\n仓位: 主{market_state.get('position_main', 0)}% / 备{market_state.get('position_alt', 0)}% / 防{market_state.get('position_def', 0)}%")
-          
-          if stock_content:
-              parts.append("📈 今日推荐\n" + "=" * 40 + "\n" + stock_content)
-          
-          if pricing_content:
-              parts.append("📊 买卖价格参考\n" + "=" * 40 + "\n" + pricing_content)
-          
-          if not parts:
-              print("没有可发送的内容")
-              exit(0)
-          
-          full_content = "\n\n---\n\n".join(parts)
-          subject = f'📊 综合股票分析报告 - {datetime.now().strftime("%Y-%m-%d")}'
-          msg = MIMEText(full_content, 'plain', 'utf-8')
-          msg['Subject'] = subject
-          msg['From'] = sender
-          msg['To'] = ', '.join(receivers)
-          
-          try:
-              with smtplib.SMTP_SSL('smtp.qq.com', 465) as server:
-                  server.login(sender, password)
-                  server.sendmail(sender, receivers, msg.as_string())
-              print("✅ 合并邮件已发送")
-          except Exception as e:
-              print(f"❌ 邮件发送失败: {e}")
-              exit(1)
-          EOF
-          
-          python send_combined_email.py
+          cd ${{ github.workspace }}
+          python pricing_calculator.py --send-email
 
       - name: 上传每日报告
         uses: actions/upload-artifact@v4
@@ -243,4 +154,5 @@ jobs:
             alphasift/data/runs/
             shared/
             pricing.txt
+            pricing.md
           retention-days: 7

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-买卖价格计算器 v3.0
-- 52周高点校验（min(策略止盈价, 52周高点×0.98)）
-- 行业差异化盈亏比（take_profit_rr）
-- 腾讯财经API健壮化（字段名匹配+正则兜底）
-- 准确性日志（自动记录次日/5日/20日表现）
+买卖价格计算器 v3.1
+- 52周高点校验
+- 行业差异化盈亏比
+- 腾讯财经API健壮化
+- 准确性日志
 - Markdown报告输出
+- 独立邮件发送功能
 """
 import yaml
 import json
@@ -13,6 +14,9 @@ import os
 import sys
 import requests
 import re
+import smtplib
+import argparse
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from scripts.logger import log, set_log_level
 from scripts.industry_fetcher import get_stock_strategy_config
@@ -116,10 +120,6 @@ def get_take_profit_rr(category):
 # 52周高点获取（复用数据源备份）
 # ============================================================
 def get_52w_high(stock_code):
-    """
-    获取52周（252个交易日）最高价
-    复用已有的数据源备份机制
-    """
     try:
         import baostock as bs
         end_date = datetime.now().strftime("%Y-%m-%d")
@@ -179,18 +179,12 @@ def save_cache_price(stock_code, price):
 
 
 def parse_tencent_price(text):
-    """
-    健壮解析腾讯财经返回数据
-    策略：字段名匹配（价格在v_pv_last_close? 实际字段名不确定，但常见是第4字段）
-    采用多种方式尝试
-    """
     if '=' not in text:
         return None
     parts = text.split('~')
     if len(parts) < 4:
         return None
-    # 尝试常见的价格索引（第4个字段，索引3）
-    for idx in [3, 4, 5]:  # 有时价格在4或5
+    for idx in [3, 4, 5]:
         if idx < len(parts):
             try:
                 val = float(parts[idx])
@@ -198,7 +192,6 @@ def parse_tencent_price(text):
                     return val
             except:
                 pass
-    # 如果上述失败，尝试正则匹配数字
     numbers = re.findall(r'\d+\.?\d*', text)
     for n in numbers:
         val = float(n)
@@ -283,27 +276,23 @@ def get_stock_realtime_price(stock_code):
     cached = get_cached_price(stock_code)
     if cached:
         return cached
-
     # 2. 腾讯财经
     price = get_price_tencent(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
-
     log("WARNING", f"腾讯失败，切换新浪: {stock_code}")
     # 3. 新浪财经
     price = get_price_sina(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
-
     log("WARNING", f"新浪失败，使用Baostock前日收盘价: {stock_code}")
     # 4. Baostock前日收盘价
     price = get_price_baostock_cache(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
-
     log("ERROR", f"所有价格源均失败: {stock_code}")
     return None
 
@@ -316,10 +305,7 @@ def calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct, take_pro
         return None
     buy_price = current_price * buy_bias
     stop_loss = buy_price * (1 - stop_loss_pct)
-    # 策略止盈价（基于盈亏比）
     strategy_take_profit = buy_price * (1 + stop_loss_pct * take_profit_rr)
-
-    # 52周高点校验
     high_52w = get_52w_high(stock_code)
     final_take_profit = strategy_take_profit
     if high_52w and high_52w > 0:
@@ -327,7 +313,6 @@ def calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct, take_pro
         if strategy_take_profit > cap:
             final_take_profit = cap
             log("DEBUG", f"{stock_code} 止盈价从 {strategy_take_profit:.2f} 限制为 {final_take_profit:.2f} (52周高点{high_52w:.2f})")
-
     return {
         "buy_price": round(buy_price, 2),
         "stop_loss": round(stop_loss, 2),
@@ -345,10 +330,8 @@ def calculate_pricing(strategy, current_price, buy_bias, stop_loss_pct, take_pro
 # 准确性日志
 # ============================================================
 def update_accuracy_log(candidates, pricing_results):
-    """记录今日推荐，供后续验证"""
     if not os.path.exists(os.path.dirname(ACCURACY_LOG_FILE)):
         os.makedirs(os.path.dirname(ACCURACY_LOG_FILE), exist_ok=True)
-    # 读取已有日志
     logs = []
     if os.path.exists(ACCURACY_LOG_FILE):
         try:
@@ -356,8 +339,6 @@ def update_accuracy_log(candidates, pricing_results):
                 logs = json.load(f)
         except:
             logs = []
-
-    # 新增今日记录
     today = datetime.now().strftime("%Y-%m-%d")
     for item, pricing in zip(candidates, pricing_results):
         if pricing:
@@ -369,7 +350,6 @@ def update_accuracy_log(candidates, pricing_results):
                 "stop_loss": pricing['stop_loss'],
                 "take_profit": pricing['final_take_profit'],
                 "current_price": pricing['current_price'],
-                # 以下字段将在后续运行中更新
                 "next_open": None,
                 "next_close": None,
                 "day5_close": None,
@@ -377,11 +357,8 @@ def update_accuracy_log(candidates, pricing_results):
                 "hit_stop_loss": False,
                 "hit_take_profit": False,
             })
-
-    # 只保留最近60天
     if len(logs) > 600:
         logs = logs[-600:]
-
     with open(ACCURACY_LOG_FILE, 'w', encoding='utf-8') as f:
         json.dump(logs, f, indent=2, ensure_ascii=False)
 
@@ -401,7 +378,6 @@ def generate_markdown_report(candidates, pricing_results, market_state):
         "| 股票 | 策略 | 类型 | 当前价 | 买入价 | 止损价 | 策略止盈 | **最终止盈** | 52周高点 | 备注 |",
         "|------|------|------|--------|--------|--------|----------|-------------|----------|------|"
     ]
-
     for item, pricing in zip(candidates, pricing_results):
         if not pricing:
             continue
@@ -413,14 +389,12 @@ def generate_markdown_report(candidates, pricing_results, market_state):
             note = "✅ 合理目标"
         else:
             note = "无52周数据"
-
         lines.append(
             f"| {item['code']} {item.get('name','')} | {market_state.get('strategy','')} | {strategy_type} | "
             f"{pricing['current_price']:.2f} | {pricing['buy_price']:.2f} | {pricing['stop_loss']:.2f} | "
             f"{pricing['strategy_take_profit']:.2f} | **{pricing['final_take_profit']:.2f}** | "
             f"{pricing['high_52w'] if pricing['high_52w'] else 'N/A'} | {note} |"
         )
-
     lines.append("")
     lines.append("---")
     lines.append("*说明：最终止盈已考虑52周高点，不会超过历史价格边界。*")
@@ -428,14 +402,57 @@ def generate_markdown_report(candidates, pricing_results, market_state):
 
 
 # ============================================================
+# 邮件发送函数
+# ============================================================
+def send_pricing_email(content_md, report_lines):
+    """发送定价报告邮件"""
+    sender = os.environ.get('EMAIL_SENDER')
+    password = os.environ.get('EMAIL_PASSWORD')
+    receivers_str = os.environ.get('EMAIL_RECEIVERS', '')
+    receivers = [r.strip() for r in receivers_str.split(',') if r.strip()]
+    if not sender or not password or not receivers:
+        log("WARNING", "邮件配置不完整，跳过定价邮件发送")
+        return
+    subject = f'📊 次日买卖价格参考 - {datetime.now().strftime("%Y-%m-%d")}'
+    # 将报告行转为纯文本（去掉Markdown标记，保留表格）
+    body_lines = []
+    for line in report_lines:
+        if line.startswith('# '):
+            body_lines.append(line[2:])
+        elif line.startswith('## '):
+            body_lines.append(line[3:])
+        elif line.startswith('|'):
+            body_lines.append(line)
+        elif line.startswith('---'):
+            continue
+        else:
+            body_lines.append(line)
+    body = "\n".join(body_lines)
+    msg = MIMEText(body, 'plain', 'utf-8')
+    msg['Subject'] = subject
+    msg['From'] = sender
+    msg['To'] = ', '.join(receivers)
+    try:
+        with smtplib.SMTP_SSL('smtp.qq.com', 465) as server:
+            server.login(sender, password)
+            server.sendmail(sender, receivers, msg.as_string())
+        log("INFO", "✅ 定价报告邮件已发送")
+    except Exception as e:
+        log("ERROR", f"定价邮件发送失败: {e}")
+
+
+# ============================================================
 # 主函数
 # ============================================================
 def main():
+    parser = argparse.ArgumentParser(description='买卖价格计算器')
+    parser.add_argument('--send-email', action='store_true', help='发送定价报告邮件')
+    args = parser.parse_args()
+
     log("INFO", "="*60)
-    log("INFO", "📊 买卖价格计算器 v3.0")
+    log("INFO", "📊 买卖价格计算器 v3.1")
     log("INFO", "="*60)
 
-    # 检查日志级别（从环境变量读取）
     if os.environ.get("DEBUG_MODE") == "true":
         set_log_level("DEBUG")
 
@@ -451,13 +468,8 @@ def main():
     for item in candidates:
         code = item['code']
         name = item.get('name', '')
-
-        # 获取行业分类（返回策略名、buy_bias、stop_loss_pct）
         strategy_name, buy_bias, stop_loss_pct = get_stock_strategy_config(code)
-        # 获取盈亏比
-        # 需要根据行业分类获取category，简化：从industry_mapping中获取
         config = load_industry_mapping()
-        # 简单方式：直接基于股票代码前缀
         if code.startswith(('300', '301', '002', '688')):
             category = '科技'
         elif code.startswith(('000', '001')):
@@ -485,17 +497,34 @@ def main():
         log("INFO", f"  ✅ {code} 当前: {pricing['current_price']:.2f}, 买入: {pricing['buy_price']:.2f}, "
             f"止盈: {pricing['final_take_profit']:.2f} (策略: {pricing['strategy_take_profit']:.2f})")
 
-    # 更新准确性日志
     update_accuracy_log(candidates, pricing_results)
 
-    # 生成Markdown报告
     report = generate_markdown_report(candidates, pricing_results, market_state)
     with open(OUTPUT_FILE, "w", encoding='utf-8') as f:
         f.write(report)
 
+    # 生成纯文本版本用于邮件
+    plain_lines = []
+    plain_lines.append("📊 次日买卖价格参考")
+    plain_lines.append(f"大盘策略: {market_state.get('strategy', 'rsi_reversion_v1')}")
+    plain_lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    plain_lines.append("")
+    plain_lines.append("股票 | 类型 | 当前价 | 买入价 | 止损价 | 最终止盈")
+    plain_lines.append("------|------|--------|--------|--------|----------")
+    for item, pricing in zip(candidates, pricing_results):
+        if not pricing:
+            continue
+        strategy_type = "追涨" if pricing['buy_bias'] > 1 else "低吸"
+        plain_lines.append(f"{item['code']} {item.get('name','')} | {strategy_type} | "
+                           f"{pricing['current_price']:.2f} | {pricing['buy_price']:.2f} | "
+                           f"{pricing['stop_loss']:.2f} | {pricing['final_take_profit']:.2f}")
+
     log("INFO", "="*60)
     log("INFO", f"✅ 定价报告已生成: {OUTPUT_FILE}")
     log("INFO", "="*60)
+
+    if args.send_email:
+        send_pricing_email(report, plain_lines)
 
 
 if __name__ == "__main__":
