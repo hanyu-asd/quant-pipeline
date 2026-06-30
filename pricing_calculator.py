@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-买卖价格计算器 v3.1
+买卖价格计算器 v3.2
 - 52周高点校验
 - 行业差异化盈亏比
 - 腾讯财经API健壮化
 - 准确性日志
 - Markdown报告输出
 - 独立邮件发送功能
+- 策略背景说明（从strategy_context.json读取）
 """
 import yaml
 import json
@@ -30,6 +31,7 @@ OUTPUT_FILE = "pricing.md"
 ACCURACY_LOG_FILE = "shared/accuracy_log.json"
 CACHE_DIR = "cache"
 INDUSTRY_FILE = "scripts/industry_mapping.json"
+STRATEGY_CONTEXT_FILE = "strategy_context.json"
 
 
 # ============================================================
@@ -59,6 +61,16 @@ def load_market_state():
                 return state
         except Exception as e:
             log("WARNING", f"加载市场状态失败: {e}")
+    return {}
+
+
+def load_strategy_context():
+    if os.path.exists(STRATEGY_CONTEXT_FILE):
+        try:
+            with open(STRATEGY_CONTEXT_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            log("WARNING", f"读取策略上下文失败: {e}")
     return {}
 
 
@@ -107,7 +119,6 @@ def load_strategy(strategy_name):
 
 
 def get_take_profit_rr(category):
-    """获取行业的盈亏比"""
     config = load_industry_mapping()
     pricing_config = config.get('pricing_config', {})
     default_pricing = config.get('default_pricing', {'take_profit_rr': 2.0})
@@ -272,23 +283,19 @@ def get_price_baostock_cache(stock_code):
 
 
 def get_stock_realtime_price(stock_code):
-    # 1. 检查缓存
     cached = get_cached_price(stock_code)
     if cached:
         return cached
-    # 2. 腾讯财经
     price = get_price_tencent(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
     log("WARNING", f"腾讯失败，切换新浪: {stock_code}")
-    # 3. 新浪财经
     price = get_price_sina(stock_code)
     if price:
         save_cache_price(stock_code, price)
         return price
     log("WARNING", f"新浪失败，使用Baostock前日收盘价: {stock_code}")
-    # 4. Baostock前日收盘价
     price = get_price_baostock_cache(stock_code)
     if price:
         save_cache_price(stock_code, price)
@@ -405,7 +412,18 @@ def generate_markdown_report(candidates, pricing_results, market_state):
 # 邮件发送函数
 # ============================================================
 def send_pricing_email(content_md, report_lines):
-    """发送定价报告邮件"""
+    """发送定价报告邮件，并包含策略背景说明"""
+    # 读取策略上下文
+    strategy_info = load_strategy_context()
+    if not strategy_info:
+        strategy_info = {
+            "strategy": "未知",
+            "strategy_type": "未知策略",
+            "decision_reason": "无",
+            "expected_action": "按策略信号执行",
+            "risk_level": "中性"
+        }
+
     sender = os.environ.get('EMAIL_SENDER')
     password = os.environ.get('EMAIL_PASSWORD')
     receivers_str = os.environ.get('EMAIL_RECEIVERS', '')
@@ -413,21 +431,39 @@ def send_pricing_email(content_md, report_lines):
     if not sender or not password or not receivers:
         log("WARNING", "邮件配置不完整，跳过定价邮件发送")
         return
+
     subject = f'📊 次日买卖价格参考 - {datetime.now().strftime("%Y-%m-%d")}'
-    # 将报告行转为纯文本（去掉Markdown标记，保留表格）
+
+    # 构建邮件正文：策略背景 + 定价表格
     body_lines = []
+    body_lines.append("📌 策略背景")
+    body_lines.append(f"当前策略：{strategy_info.get('strategy_type', '未知')} ({strategy_info.get('strategy', '')})")
+    body_lines.append(f"决策原因：{strategy_info.get('decision_reason', '无')}")
+    body_lines.append(f"预期操作：{strategy_info.get('expected_action', '按策略信号执行')}")
+    body_lines.append(f"风险等级：{strategy_info.get('risk_level', '中性')}")
+    body_lines.append("")
+    body_lines.append("📋 定价参考（基于上述策略逻辑筛选）")
+    body_lines.append("")
+    # 添加表格头
+    body_lines.append("股票代码 | 名称 | 类型 | 当前价 | 买入价 | 止损价 | 止盈价")
+    body_lines.append("---------|------|------|--------|--------|--------|--------")
     for line in report_lines:
-        if line.startswith('# '):
-            body_lines.append(line[2:])
-        elif line.startswith('## '):
-            body_lines.append(line[3:])
-        elif line.startswith('|'):
-            body_lines.append(line)
-        elif line.startswith('---'):
-            continue
-        else:
-            body_lines.append(line)
+        if line.startswith("|") and "股票" not in line:  # 过滤掉表格头
+            parts = line.split("|")
+            if len(parts) >= 7:
+                code_name = parts[1].strip()
+                strategy_type = parts[3].strip()
+                current = parts[4].strip()
+                buy = parts[5].strip()
+                stop = parts[6].strip()
+                take = parts[7].strip() if len(parts) > 7 else "N/A"
+                body_lines.append(f"{code_name} | {strategy_type} | {current} | {buy} | {stop} | {take}")
+
+    body_lines.append("")
+    body_lines.append("💡 提示：AI分析为独立综合判断，请结合策略逻辑自主决策。")
+
     body = "\n".join(body_lines)
+
     msg = MIMEText(body, 'plain', 'utf-8')
     msg['Subject'] = subject
     msg['From'] = sender
@@ -450,7 +486,7 @@ def main():
     args = parser.parse_args()
 
     log("INFO", "="*60)
-    log("INFO", "📊 买卖价格计算器 v3.1")
+    log("INFO", "📊 买卖价格计算器 v3.2")
     log("INFO", "="*60)
 
     if os.environ.get("DEBUG_MODE") == "true":

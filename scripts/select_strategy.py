@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.5 - 缓存仅用于容错，过期数据不参与策略决策
+v6.6 - 增加策略上下文文件生成
 """
 import requests
 import json
@@ -47,7 +47,6 @@ def load_index_cache(symbol):
         return None, None
 
 def is_cache_valid(cache_date):
-    """检查缓存是否当天"""
     if not cache_date:
         return False
     return cache_date == datetime.now().strftime("%Y-%m-%d")
@@ -232,7 +231,6 @@ def get_position_advice(trend, pattern, mainline_confidence, market_state):
         return 40, 30, 30, "震荡行情，均衡配置"
 
 def generate_default_market_state():
-    """生成默认市场状态（当所有数据都无法获取时）"""
     return {
         "date": datetime.now().strftime("%Y-%m-%d"),
         "trend": "下降趋势",
@@ -257,14 +255,12 @@ def generate_default_market_state():
 
 def main():
     log("INFO", "="*70)
-    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.5）")
+    log("INFO", "📊 双窗口趋势判断 + 动态主线识别（v6.6）")
     log("INFO", "="*70)
     
-    # 获取上证指数数据
     sh_closes = get_index_data("sh000001", 100)
     sh_cache_date, sh_cache_closes = load_index_cache("sh000001")
     
-    # 判断是否使用实时数据
     use_realtime = sh_closes is not None
     
     if use_realtime:
@@ -272,7 +268,6 @@ def main():
         save_index_cache("sh000001", sh_closes)
     else:
         log("WARNING", "❌ 上证指数实时数据获取失败")
-        # 检查是否有实时可用的缓存（当天）
         if is_cache_valid(sh_cache_date) and sh_cache_closes:
             log("WARNING", "⚠️ 使用今日缓存数据（仅用于防止崩溃，策略决策采用默认防守策略）")
             sh_closes = sh_cache_closes
@@ -286,47 +281,52 @@ def main():
                 json.dump(default_state, f, indent=2, ensure_ascii=False)
             with open("selected_strategy.txt", "w") as f:
                 f.write("rsi_reversion_v1")
-            log("INFO", "默认市场状态已保存")
+            # 生成默认策略上下文
+            default_context = {
+                "strategy": "rsi_reversion_v1",
+                "strategy_type": "均值回归/超卖反弹",
+                "decision_reason": "数据缺失，默认防守策略",
+                "expected_action": "按防守策略执行",
+                "risk_level": "防守"
+            }
+            with open("strategy_context.json", "w", encoding="utf-8") as f:
+                json.dump(default_context, f, indent=2, ensure_ascii=False)
+            log("INFO", "默认市场状态和策略上下文已保存")
             return
     
-    # 获取创业板指数据
-    cy_closes = get_index_data("sz399006", 100)
-    if cy_closes:
-        log("INFO", f"✅ 创业板指数据获取成功，交易日数: {len(cy_closes)}")
-        save_index_cache("sz399006", cy_closes)
-    else:
-        log("WARNING", "创业板指数据获取失败，将使用上证指数替代")
+    if not cy_closes:
         cy_closes = sh_closes
     
-    # ⚠️ 关键判断：如果使用的是缓存数据（非实时），直接采用默认防守策略
     is_data_from_cache = not use_realtime
     if is_data_from_cache:
         log("WARNING", "⚠️ 数据来源为缓存（过期数据），不进行趋势判断，采用默认防守策略")
         default_state = generate_default_market_state()
-        # 但保留一些基本信息
         default_state["current_price"] = sh_closes[-1] if sh_closes else 0
         default_state["date"] = datetime.now().strftime("%Y-%m-%d")
         with open("market_state.json", "w", encoding="utf-8") as f:
             json.dump(default_state, f, indent=2, ensure_ascii=False)
         with open("selected_strategy.txt", "w") as f:
             f.write("rsi_reversion_v1")
+        # 生成策略上下文
+        context = {
+            "strategy": "rsi_reversion_v1",
+            "strategy_type": "均值回归/超卖反弹",
+            "decision_reason": "数据不可用，采用默认防守策略",
+            "expected_action": "按防守策略执行",
+            "risk_level": "防守"
+        }
+        with open("strategy_context.json", "w", encoding="utf-8") as f:
+            json.dump(context, f, indent=2, ensure_ascii=False)
         log("INFO", "✅ 默认防守策略已保存")
         return
     
-    # ============================================================
-    # 只有实时数据才执行完整的趋势判断和策略选择
-    # ============================================================
-    
-    # 主线识别（结构化）
     log("INFO", "正在识别市场主线...")
     mainline_result = identify_mainline()
     
-    # 趋势和状态判断
     trend, market_state, pattern, tech_premium, ma20, ma60, momentum_20, current = detect_trend_and_state(
         sh_closes, cy_closes, mainline_result
     )
     
-    # 策略决策
     strategy = None
     reason = ""
     
@@ -388,6 +388,41 @@ def main():
     }
     with open("market_state.json", "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
+    
+    # 生成策略上下文文件
+    strategy_context = {
+        "strategy": strategy,
+        "strategy_type": {
+            "rsi_reversion_v1": "均值回归/超卖反弹",
+            "trend_pullback_rebound": "趋势跟踪/回调买入",
+            "momentum_quality": "动量质量/强势股",
+            "volume_breakout": "放量突破",
+            "balanced_alpha": "均衡配置",
+            "dual_low": "双低策略",
+            "quality_value": "质量价值"
+        }.get(strategy, "未知策略"),
+        "decision_reason": reason,
+        "expected_action": {
+            "rsi_reversion_v1": "寻找超卖股票，等待技术性反弹",
+            "trend_pullback_rebound": "寻找上升趋势中的回调机会",
+            "momentum_quality": "寻找动量强劲的优质股票",
+            "volume_breakout": "寻找放量突破的强势股",
+            "balanced_alpha": "均衡配置，分散风险",
+            "dual_low": "寻找低估值低波动股票",
+            "quality_value": "寻找高质量价值股"
+        }.get(strategy, "按策略信号执行"),
+        "risk_level": {
+            "rsi_reversion_v1": "防守",
+            "trend_pullback_rebound": "积极",
+            "momentum_quality": "积极",
+            "volume_breakout": "激进",
+            "balanced_alpha": "中性",
+            "dual_low": "防守",
+            "quality_value": "中性"
+        }.get(strategy, "中性")
+    }
+    with open("strategy_context.json", "w", encoding="utf-8") as f:
+        json.dump(strategy_context, f, indent=2, ensure_ascii=False)
     
     log("INFO", "✅ 结果已保存")
 
