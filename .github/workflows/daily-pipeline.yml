@@ -51,7 +51,6 @@ jobs:
           pip install -e .
           cd ../alphaevo
           pip install -e .
-          # 基础数据源 + TickFlow（新增）
           pip install requests baostock akshare pandas numpy tushare tickflow
 
       - name: 动态主线识别 + 策略选择
@@ -100,7 +99,12 @@ jobs:
             cd alphasift
             alphasift screen $ALPHA_STRATEGY --no-llm --save-run --market cn
             mkdir -p ../shared
-            cp data/runs/*.json ../shared/candidates.json 2>/dev/null || echo '{"picks":[]}' > ../shared/candidates.json
+            cp data/runs/*.json ../shared/candidates_all.json 2>/dev/null || echo '{"picks":[]}' > ../shared/candidates_all.json
+
+      - name: 合并主线候选与全市场候选
+        run: |
+          cd ${{ github.workspace }}
+          python scripts/merge_candidates.py
 
       - name: 解析选股结果并注入环境变量
         id: pass_stocks
