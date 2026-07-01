@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
 双窗口趋势判断 + 主线识别 + 策略选择
-v6.9 - 优先使用 TickFlow 获取指数数据
+v6.9 - TickFlow 优先，指数数据获取增强
 """
 import requests
 import json
 import re
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from identify_mainline import identify_mainline
 from logger import log
@@ -60,27 +61,35 @@ def is_cache_valid(cache_date):
 # 指数数据获取（TickFlow 优先）
 # ============================================================
 def get_index_history_tickflow(symbol, days=100):
-    """使用 TickFlow 获取指数日线数据"""
-    try:
-        from tickflow import TickFlow
-        tf = TickFlow.free()
-        # 转换符号格式，例如 sh000001 -> 000001.SH
-        code = symbol.replace('sh', '').replace('sz', '')
-        market = 'SH' if 'sh' in symbol else 'SZ'
-        full_symbol = f"{code}.{market}"
-        df = tf.klines.get(
-            symbol=full_symbol,
-            period="1d",
-            count=days,
-            as_dataframe=True
-        )
-        if df is not None and len(df) >= 10:
-            df = df.sort_values('trade_date')
-            return df['close'].values.tolist()
-        return None
-    except Exception as e:
-        log("WARNING", f"[TickFlow] 获取指数 {symbol} 失败: {e}")
-        return None
+    """TickFlow 获取指数日线，多种格式 + 重试"""
+    code = symbol.replace('sh', '').replace('sz', '')
+    formats = [
+        f"{code}.SH",
+        f"{code}.SZ",
+        f"sh{code}",
+        f"sz{code}",
+    ]
+    for sym in formats:
+        for attempt in range(2):
+            try:
+                from tickflow import TickFlow
+                tf = TickFlow.free()
+                df = tf.klines.get(
+                    symbol=sym,
+                    period="1d",
+                    count=days,
+                    as_dataframe=True
+                )
+                if df is not None and len(df) >= 10:
+                    df = df.sort_values('trade_date')
+                    log("DEBUG", f"TickFlow 指数成功 {symbol}，格式: {sym}")
+                    return df['close'].values.tolist()
+            except Exception as e:
+                log("WARNING", f"TickFlow 指数尝试 {sym} (attempt {attempt+1}): {e}")
+                if attempt == 0:
+                    time.sleep(0.5)
+    log("ERROR", f"TickFlow 指数所有格式尝试均失败: {symbol}")
+    return None
 
 
 def get_index_history_baostock(symbol, days=100):
@@ -172,7 +181,7 @@ def get_index_data(symbol, days=100):
 
     log("INFO", f"正在获取 {name} 数据...")
 
-    # 1. TickFlow（首选）
+    # 1. TickFlow
     closes = get_index_history_tickflow(symbol, days)
     if closes:
         log("INFO", f"  ✅ TickFlow成功: {len(closes)}个交易日")

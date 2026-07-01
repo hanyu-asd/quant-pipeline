@@ -16,6 +16,7 @@ import requests
 import re
 import smtplib
 import argparse
+import time
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from scripts.logger import log, set_log_level
@@ -127,26 +128,32 @@ def get_take_profit_rr(category):
 # 52周高点获取（TickFlow 优先，Baostock 备选）
 # ============================================================
 def get_52w_high(stock_code):
-    # 1. 首选 TickFlow
-    try:
-        from tickflow import TickFlow
-        tf = TickFlow.free()
-        market = 'SH' if stock_code.startswith('6') else 'SZ'
-        full_symbol = f"{stock_code}.{market}"
-        df = tf.klines.get(
-            symbol=full_symbol,
-            period="1d",
-            count=260,
-            as_dataframe=True
-        )
-        if df is not None and len(df) > 0 and 'high' in df.columns:
-            df = df.sort_values('trade_date')
-            high = df['high'].max()
-            if high and high > 0:
-                log("DEBUG", f"TickFlow 获取 {stock_code} 52周高点成功: {high}")
-                return float(high)
-    except Exception as e:
-        log("WARNING", f"TickFlow 52周高点获取失败: {e}")
+    # 1. 首选 TickFlow（多种格式）
+    formats = [
+        f"{stock_code}.SH",
+        f"{stock_code}.SZ",
+        f"sh{stock_code}",
+        f"sz{stock_code}",
+    ]
+    for sym in formats:
+        try:
+            from tickflow import TickFlow
+            tf = TickFlow.free()
+            df = tf.klines.get(
+                symbol=sym,
+                period="1d",
+                count=260,
+                as_dataframe=True
+            )
+            if df is not None and len(df) > 0 and 'high' in df.columns:
+                df = df.sort_values('trade_date')
+                high = df['high'].max()
+                if high and high > 0:
+                    log("DEBUG", f"TickFlow 获取 {stock_code} 52周高点成功，格式: {sym}")
+                    return float(high)
+        except Exception as e:
+            log("WARNING", f"TickFlow 52周高点尝试 {sym} 失败: {e}")
+            continue
 
     # 2. 备选 Baostock
     try:
@@ -211,28 +218,36 @@ def save_cache_price(stock_code, price):
 
 
 def get_price_tickflow(stock_code):
-    """使用 TickFlow 获取当日收盘价"""
-    try:
-        from tickflow import TickFlow
-        tf = TickFlow.free()
-        market = 'SH' if stock_code.startswith('6') else 'SZ'
-        full_symbol = f"{stock_code}.{market}"
-        df = tf.klines.get(
-            symbol=full_symbol,
-            period="1d",
-            count=1,  # 只取最近1条（当日）
-            as_dataframe=True
-        )
-        if df is not None and len(df) > 0 and 'close' in df.columns:
-            df = df.sort_values('trade_date')
-            price = float(df['close'].iloc[-1])
-            if 0 < price < 10000:
-                log("DEBUG", f"TickFlow 获取 {stock_code} 收盘价成功: {price}")
-                return price
-        return None
-    except Exception as e:
-        log("WARNING", f"TickFlow 价格获取失败 {stock_code}: {e}")
-        return None
+    """TickFlow 获取收盘价，多种格式 + 重试"""
+    formats = [
+        f"{stock_code}.SH",
+        f"{stock_code}.SZ",
+        f"sh{stock_code}",
+        f"sz{stock_code}",
+    ]
+    for sym in formats:
+        for attempt in range(2):
+            try:
+                from tickflow import TickFlow
+                tf = TickFlow.free()
+                df = tf.klines.get(
+                    symbol=sym,
+                    period="1d",
+                    count=1,
+                    as_dataframe=True
+                )
+                if df is not None and len(df) > 0 and 'close' in df.columns:
+                    df = df.sort_values('trade_date')
+                    price = float(df['close'].iloc[-1])
+                    if 0 < price < 10000:
+                        log("DEBUG", f"TickFlow 价格成功 {stock_code}，格式: {sym}")
+                        return price
+            except Exception as e:
+                log("WARNING", f"TickFlow 价格尝试 {sym} (attempt {attempt+1}): {e}")
+                if attempt == 0:
+                    time.sleep(0.5)
+    log("ERROR", f"TickFlow 价格所有格式尝试均失败: {stock_code}")
+    return None
 
 
 def parse_tencent_price(text):
