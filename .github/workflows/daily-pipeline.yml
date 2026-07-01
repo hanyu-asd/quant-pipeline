@@ -51,7 +51,8 @@ jobs:
           pip install -e .
           cd ../alphaevo
           pip install -e .
-          pip install requests baostock akshare pandas numpy tushare tickflow
+          # 基础数据源 + TickFlow + zzshare
+          pip install requests baostock akshare pandas numpy tushare tickflow zzshare
 
       - name: 动态主线识别 + 策略选择
         id: mainline_strategy
@@ -71,6 +72,17 @@ jobs:
             mkdir -p daily_stock_analysis/reports/
             cp market_state.json daily_stock_analysis/reports/market_state.json
             echo "✅ 市场状态已同步"
+          fi
+
+      - name: 准备行业分类缓存（首次运行时生成）
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        run: |
+          cd ${{ github.workspace }}
+          if [ ! -f "data/industry_cache.json" ]; then
+            python scripts/update_industry_cache.py
+          else
+            echo "✅ 行业缓存已存在，跳过更新"
           fi
 
       - name: AlphaSift 全市场扫描
