@@ -8,7 +8,7 @@
 import json
 import os
 import sys
-from scripts.industry_fetcher import get_stock_industry
+from industry_fetcher import get_stock_industry   # 修改这行
 
 # 主线分组 → 行业关键词映射（与 workflow 中的过滤保持一致）
 MAINLINE_INDUSTRY_MAP = {
