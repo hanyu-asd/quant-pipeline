@@ -8,9 +8,12 @@
 import json
 import os
 import sys
-from scripts.industry_fetcher import get_stock_strategy_config, _query_stock_industry_baostock
+import time
+from datetime import datetime, timedelta
 
-# 主线分组 → 行业关键词映射（用于判断是否属于该主线）
+# ============================================================
+# 主线分组 → 行业关键词映射
+# ============================================================
 MAINLINE_INDUSTRY_MAP = {
     "半导体": ["半导体", "电子", "芯片", "集成电路"],
     "AI算力": ["计算机", "通信", "电子", "人工智能", "AI"],
@@ -25,10 +28,46 @@ MAINLINE_INDUSTRY_MAP = {
     "红利": ["银行", "公用事业", "红利"],
 }
 
-def get_mainline_industries(main_group):
-    """根据主线分组返回行业关键词列表"""
-    return MAINLINE_INDUSTRY_MAP.get(main_group, [])
+# ============================================================
+# 行业查询函数（从 Baostock 获取）
+# ============================================================
+def query_stock_industry_baostock(stock_code):
+    """使用 Baostock 查询股票行业"""
+    try:
+        import baostock as bs
+        # 判断市场前缀
+        if stock_code.startswith('6'):
+            code_with_prefix = f"sh.{stock_code}"
+        elif stock_code.startswith(('0', '3')):
+            code_with_prefix = f"sz.{stock_code}"
+        else:
+            return ""
 
+        lg = bs.login()
+        if lg.error_code != '0':
+            return ""
+        rs = bs.query_stock_industry(code=code_with_prefix)
+        if rs.error_code != '0' or not rs.next():
+            bs.logout()
+            return ""
+        row = rs.get_row_data()
+        bs.logout()
+        if len(row) >= 4:
+            industry = row[3]  # industry 字段
+            return industry
+        return ""
+    except Exception as e:
+        print(f"⚠️ 查询 {stock_code} 行业失败: {e}")
+        return ""
+
+def get_stock_industry(stock_code):
+    """获取股票行业（带简单缓存）"""
+    # 简化：每次都实时查询，但候选股数量不多（≤10只），可以接受
+    return query_stock_industry_baostock(stock_code)
+
+# ============================================================
+# 核心逻辑
+# ============================================================
 def load_candidates(filepath):
     if not os.path.exists(filepath):
         return []
@@ -40,24 +79,18 @@ def load_candidates(filepath):
         print(f"⚠️ 读取候选文件失败: {e}")
         return []
 
-def get_stock_industry(stock_code):
-    """获取股票行业名称（复用 industry_fetcher）"""
-    industry = _query_stock_industry_baostock(stock_code)
-    if not industry:
-        # 如果 Baostock 查询失败，尝试从代码前缀简单判断（兜底）
-        if stock_code.startswith('6'):
-            return "传统"  # 沪市主板
-        elif stock_code.startswith(('0', '3')):
-            return "科技"  # 深市
-        else:
-            return "未知"
-    return industry
+def get_mainline_industries(main_group):
+    """根据主线分组返回行业关键词列表"""
+    return MAINLINE_INDUSTRY_MAP.get(main_group, [])
 
 def is_stock_in_mainline(stock_code, mainline_industries):
     """判断股票是否属于主线行业"""
     if not mainline_industries:
         return False  # 无主线
     industry = get_stock_industry(stock_code)
+    if not industry:
+        # 如果查询失败，默认归为非主线（避免误判）
+        return False
     # 检查行业是否包含关键词
     for kw in mainline_industries:
         if kw in industry:
@@ -65,23 +98,20 @@ def is_stock_in_mainline(stock_code, mainline_industries):
     return False
 
 def merge_and_rank(picks_all, main_group):
-    """
-    合并全市场候选与主线候选
-    主线候选加 5 分，然后按 final_score 排序去重
-    """
+    """合并全市场候选与主线候选，主线候选加 5 分"""
     mainline_industries = get_mainline_industries(main_group)
     if not mainline_industries:
         # 无主线时，直接返回全市场候选，不加分
         return sorted(picks_all, key=lambda x: x.get('final_score', 0), reverse=True)
 
     merged = {}
-    for p in picks_all:
+    # 遍历所有候选
+    for idx, p in enumerate(picks_all):
         code = p.get('code')
         if not code:
             continue
         # 判断是否属于主线
         is_main = is_stock_in_mainline(code, mainline_industries)
-        # 复制一份，添加主线标记和加分
         new_p = p.copy()
         new_p['is_mainline'] = is_main
         if is_main:
@@ -105,8 +135,8 @@ def main():
                 main_data = json.load(f)
                 main_group = main_data.get('main_group')
                 print(f"📊 当前主线: {main_group}")
-        except:
-            pass
+        except Exception as e:
+            print(f"⚠️ 读取主线结果失败: {e}")
 
     # 读取全市场候选
     candidates_all_file = "shared/candidates_all.json"
@@ -115,7 +145,7 @@ def main():
         print("⚠️ 全市场候选为空，无法合并")
         # 输出空候选，后续会走默认备选
         with open("shared/candidates.json", "w", encoding='utf-8') as f:
-            json.dump({"picks": []}, f)
+            json.dump({"picks": []}, f, indent=2)
         sys.exit(0)
 
     # 合并并排序
@@ -129,7 +159,7 @@ def main():
 
     # 输出最终结果
     output_data = {
-        "picks": merged_picks,
+        "picks": merged_picks[:10],  # 只保留前10只
         "original_count": len(picks_all),
         "mainline_count": main_count,
         "merged_count": len(merged_picks)
