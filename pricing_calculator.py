@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-买卖价格计算器 v3.5
+买卖价格计算器 v3.6
 - 52周高点校验（TickFlow 优先，Baostock 备选）
 - 行业差异化盈亏比
 - 盘后价格获取（缓存 → TickFlow → 腾讯财经 → 新浪 → Baostock 前日收盘价）
 - 准确性日志
 - Markdown报告输出
-- 独立邮件发送功能（含策略背景）
+- 独立邮件发送功能（直接从 pricing.md 读取，空数据时跳过）
 """
 import yaml
 import json
@@ -494,9 +494,11 @@ def generate_markdown_report(candidates, pricing_results, market_state):
 
 
 # ============================================================
-# 邮件发送（含策略背景）
+# 邮件发送（直接从 pricing.md 读取，空数据时跳过）
 # ============================================================
-def send_pricing_email(content_md, report_lines):
+def send_pricing_email():
+    """发送定价报告邮件（直接从 pricing.md 读取表格）"""
+    # 读取策略上下文
     strategy_info = load_strategy_context()
     if not strategy_info:
         strategy_info = {
@@ -507,6 +509,43 @@ def send_pricing_email(content_md, report_lines):
             "risk_level": "中性"
         }
 
+    # 读取定价报告文件
+    pricing_md_file = "pricing.md"
+    if not os.path.exists(pricing_md_file):
+        log("WARNING", "定价报告文件不存在，跳过邮件发送")
+        return
+
+    with open(pricing_md_file, 'r', encoding='utf-8') as f:
+        md_content = f.read()
+
+    # 检查是否有有效数据（表格中是否包含股票代码）
+    if "| 股票 |" not in md_content or "|------|" not in md_content:
+        log("WARNING", "定价报告格式异常，跳过邮件发送")
+        return
+
+    # 提取表格行
+    lines = md_content.split('\n')
+    table_rows = []
+    in_table = False
+    for line in lines:
+        if "| 股票 |" in line:
+            in_table = True
+            continue
+        if "|------|" in line:
+            continue
+        if in_table and line.startswith('|') and '|' in line:
+            # 检查是否有股票代码（数字）
+            parts = line.split('|')
+            if len(parts) > 1 and any(c.isdigit() for c in parts[1]):
+                table_rows.append(line.strip())
+        if in_table and not line.startswith('|'):
+            in_table = False
+
+    if not table_rows:
+        log("WARNING", "定价报告无有效数据行，跳过邮件发送")
+        return
+
+    # 邮件配置
     sender = os.environ.get('EMAIL_SENDER')
     password = os.environ.get('EMAIL_PASSWORD')
     receivers_str = os.environ.get('EMAIL_RECEIVERS', '')
@@ -526,21 +565,28 @@ def send_pricing_email(content_md, report_lines):
     body_lines.append("")
     body_lines.append("📋 定价参考（基于上述策略逻辑筛选）")
     body_lines.append("")
+    body_lines.append("| 股票代码 | 名称 | 类型 | 当前价 | 买入价 | 止损价 | 止盈价 |")
+    body_lines.append("|----------|------|------|--------|--------|--------|--------|")
 
-    # 构建定价表格
-    body_lines.append("股票代码 | 名称 | 类型 | 当前价 | 买入价 | 止损价 | 止盈价")
-    body_lines.append("---------|------|------|--------|--------|--------|--------")
-    for line in report_lines:
-        if line.startswith("|") and "股票" not in line:
-            parts = line.split("|")
-            if len(parts) >= 7:
-                code_name = parts[1].strip()
-                strategy_type = parts[3].strip()
-                current = parts[4].strip()
-                buy = parts[5].strip()
-                stop = parts[6].strip()
-                take = parts[7].strip() if len(parts) > 7 else "N/A"
-                body_lines.append(f"{code_name} | {strategy_type} | {current} | {buy} | {stop} | {take}")
+    for row in table_rows:
+        # 解析表格行：格式为 | 股票 | 策略 | 类型 | 当前价 | 买入价 | 止损价 | 策略止盈 | 最终止盈 | 52周高点 | 备注 |
+        parts = [p.strip() for p in row.split('|') if p.strip()]
+        if len(parts) >= 8:
+            code_name = parts[0]
+            strategy_type = parts[2]
+            current = parts[3]
+            buy = parts[4]
+            stop = parts[5]
+            take = parts[7]  # 最终止盈
+            # 拆分代码和名称
+            code_parts = code_name.split(' ')
+            if len(code_parts) >= 2:
+                code = code_parts[0]
+                name = ' '.join(code_parts[1:])
+            else:
+                code = code_name
+                name = ''
+            body_lines.append(f"| {code} | {name} | {strategy_type} | {current} | {buy} | {stop} | {take} |")
 
     body_lines.append("")
     body_lines.append("💡 提示：AI分析为独立综合判断，请结合策略逻辑自主决策。")
@@ -551,6 +597,7 @@ def send_pricing_email(content_md, report_lines):
     msg['Subject'] = subject
     msg['From'] = sender
     msg['To'] = ', '.join(receivers)
+
     try:
         with smtplib.SMTP_SSL('smtp.qq.com', 465) as server:
             server.login(sender, password)
@@ -569,7 +616,7 @@ def main():
     args = parser.parse_args()
 
     log("INFO", "=" * 60)
-    log("INFO", "📊 买卖价格计算器 v3.5")
+    log("INFO", "📊 买卖价格计算器 v3.6")
     log("INFO", "=" * 60)
 
     if os.environ.get("DEBUG_MODE") == "true":
@@ -622,28 +669,12 @@ def main():
     with open(OUTPUT_FILE, "w", encoding='utf-8') as f:
         f.write(report)
 
-    # 纯文本版本用于邮件
-    plain_lines = []
-    plain_lines.append("📊 次日买卖价格参考")
-    plain_lines.append(f"大盘策略: {market_state.get('strategy', 'rsi_reversion_v1')}")
-    plain_lines.append(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    plain_lines.append("")
-    plain_lines.append("股票 | 类型 | 当前价 | 买入价 | 止损价 | 最终止盈")
-    plain_lines.append("------|------|--------|--------|--------|----------")
-    for item, pricing in zip(candidates, pricing_results):
-        if not pricing:
-            continue
-        strategy_type = "追涨" if pricing['buy_bias'] > 1 else "低吸"
-        plain_lines.append(f"{item['code']} {item.get('name','')} | {strategy_type} | "
-                           f"{pricing['current_price']:.2f} | {pricing['buy_price']:.2f} | "
-                           f"{pricing['stop_loss']:.2f} | {pricing['final_take_profit']:.2f}")
-
     log("INFO", "=" * 60)
     log("INFO", f"✅ 定价报告已生成: {OUTPUT_FILE}")
     log("INFO", "=" * 60)
 
     if args.send_email:
-        send_pricing_email(report, plain_lines)
+        send_pricing_email()
 
 
 if __name__ == "__main__":
